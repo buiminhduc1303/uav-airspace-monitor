@@ -103,8 +103,6 @@ export default function App() {
             </div>
             <div className="btns">
               <button className="pri" id="bAdd">+ Thêm UAV</button>
-              <button id="bAddParallelForm" title="Thêm mục tiêu UAV song song cách vùng hạn chế 3km">+ UAV Song song (3km)</button>
-              <button id="bSep" title="Phân tách giãn cách các mục tiêu UAV khi bị chồng lấn">↔ Tách mục tiêu</button>
               <button id="bAim">Bay vào tâm</button>
               <button id="bRnd">Ngẫu nhiên</button>
               <button id="bClr">Xoá hết</button>
