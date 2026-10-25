@@ -74,7 +74,7 @@ export function initEngine() {
   const SN = ['AN TOÀN', 'CẢNH BÁO', 'VÙNG HẠN CHẾ', 'VÙNG CẤM'];
   const SC = ['#19d38c', '#ffb020', '#ffb020', '#ff4d4f'];
 
-  let T = [], seq = 0, run = true, mult = 20, range = 40, mode = 'radar', snd = true, logs = [], last = performance.now(), sw = 0, dirty = true, ac, acc = 0;
+  let listHold = false, T = [], seq = 0, run = true, mult = 20, range = 40, mode = 'radar', snd = true, logs = [], last = performance.now(), sw = 0, dirty = true, ac, acc = 0;
 
   const dz = (z, x, y) => {
     const a = x * U.x + y * U.y, c = x * V.x + y * V.y;
@@ -421,7 +421,7 @@ export function initEngine() {
     if (bg) bg.textContent = i + w;
     $('#hT').textContent = 'Danh sách mục tiêu (' + visible.length + ')';
 
-    $('#list').innerHTML = visible.map(t => {
+    const listHtml = visible.map(t => {
       const a = t.an || {};
       const sc = t.scenario;
       let scHtml = '';
@@ -452,53 +452,65 @@ export function initEngine() {
         `;
       }
 
-      return `<div class="card s${t.st}" data-card-id="${t.id}">
+      const hd = t.h.toFixed(0);
+      return `<article class="card s${t.st}" data-card-id="${t.id}">
         <div class="ch">
-          <b>${t.dispName}</b><span class="id">${t.id}</span>
-          <span class="chip sens-${t.sensorLevel}">${t.sensorLabel}</span>
-          <span class="chip c${t.st}">${SN[t.st]}</span>
-          <button data-del="${t.id}" title="Xoá">✕</button>
+          <span class="ch-dot"></span>
+          <div class="ch-name"><b>${t.dispName}</b><span class="id">${t.id}</span></div>
+          <button class="icon-btn" data-del="${t.id}" title="Xoá" aria-label="Xoá ${t.id}"><svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button>
         </div>
         <div class="target-subhead">
-          <span class="hd-badge">Hướng bay: <b>${t.h.toFixed(0)}°</b></span>
+          <span class="chip c${t.st}">${SN[t.st]}</span>
+          <span class="chip sens-${t.sensorLevel}">${t.sensorLabel}</span>
+          <span class="hd-badge"><svg viewBox="0 0 24 24" width="12" height="12" style="transform:rotate(${hd}deg)" aria-hidden="true"><path d="M12 2 19 21 12 17 5 21Z" fill="currentColor"/></svg>Hướng bay: <b>${hd}°</b></span>
         </div>
         <div class="gr">
           <span>CÁCH ARP<b>${fm(a.d)}</b></span>
           <span>BRG TỪ ARP<b>${a.b !== undefined ? a.b.toFixed(0) : '--'}°</b></span>
           <span>ĐỘ CAO<b>${t.alt} m</b></span>
           <span>TỐC ĐỘ<b>${t.s} m/s</b></span>
-          <span>HƯỚNG BAY<b>${t.h.toFixed(0)}°</b></span>
-          <span>CÁCH VÙNG CẤM<b>${fm(a.dP)}</b></span>
-          <span>CÁCH VÙNG HẠN CHẾ<b>${fm(a.dR)}</b></span>
-          <span class="span-2">ETA VÙNG CẤM<b>${a.eP === 0 ? 'ĐÃ VÀO' : a.eP == null ? '--' : a.eP + ' s'}</b></span>
+          <span>HƯỚNG BAY<b>${hd}°</b></span>
+          <span class="m-p">CÁCH VÙNG CẤM<b>${fm(a.dP)}</b></span>
+          <span class="m-r">CÁCH VÙNG HẠN CHẾ<b>${fm(a.dR)}</b></span>
+          <span class="span-2 m-eta">ETA VÙNG CẤM<b>${a.eP === 0 ? 'ĐÃ VÀO' : a.eP == null ? '--' : a.eP + ' s'}</b></span>
         </div>
         ${scHtml}
         <div class="c-adj">
           <div class="adj-grp">
-            <span class="adj-lbl">Độ cao:</span>
-            <button data-adj-alt="-50" data-id="${t.id}" title="Giảm 50m">-50m</button>
-            <button data-adj-alt="-20" data-id="${t.id}" title="Giảm 20m">-20m</button>
-            <button data-adj-alt="-10" data-id="${t.id}" title="Giảm 10m">-10m</button>
+            <span class="adj-lbl">Độ cao</span>
+            <div class="adj-btns">
+              <button data-adj-alt="-50" data-id="${t.id}" title="Giảm 50m">-50m</button>
+              <button data-adj-alt="-20" data-id="${t.id}" title="Giảm 20m">-20m</button>
+              <button data-adj-alt="-10" data-id="${t.id}" title="Giảm 10m">-10m</button>
+            </div>
             <b>${t.alt} m</b>
-            <button data-adj-alt="10" data-id="${t.id}" title="Tăng 10m">+10m</button>
-            <button data-adj-alt="20" data-id="${t.id}" title="Tăng 20m">+20m</button>
-            <button data-adj-alt="50" data-id="${t.id}" title="Tăng 50m">+50m</button>
+            <div class="adj-btns">
+              <button data-adj-alt="10" data-id="${t.id}" title="Tăng 10m">+10m</button>
+              <button data-adj-alt="20" data-id="${t.id}" title="Tăng 20m">+20m</button>
+              <button data-adj-alt="50" data-id="${t.id}" title="Tăng 50m">+50m</button>
+            </div>
           </div>
           <div class="adj-grp">
-            <span class="adj-lbl">Tốc độ:</span>
-            <button data-adj-spd="-5" data-id="${t.id}" title="Giảm 5 m/s">-5</button>
-            <button data-adj-spd="-2" data-id="${t.id}" title="Giảm 2 m/s">-2</button>
-            <button data-adj-spd="-1" data-id="${t.id}" title="Giảm 1 m/s">-1</button>
+            <span class="adj-lbl">Tốc độ</span>
+            <div class="adj-btns">
+              <button data-adj-spd="-5" data-id="${t.id}" title="Giảm 5 m/s">-5</button>
+              <button data-adj-spd="-2" data-id="${t.id}" title="Giảm 2 m/s">-2</button>
+              <button data-adj-spd="-1" data-id="${t.id}" title="Giảm 1 m/s">-1</button>
+            </div>
             <b>${t.s} m/s</b>
-            <button data-adj-spd="1" data-id="${t.id}" title="Tăng 1 m/s">+1</button>
-            <button data-adj-spd="2" data-id="${t.id}" title="Tăng 2 m/s">+2</button>
-            <button data-adj-spd="5" data-id="${t.id}" title="Tăng 5 m/s">+5</button>
+            <div class="adj-btns">
+              <button data-adj-spd="1" data-id="${t.id}" title="Tăng 1 m/s">+1</button>
+              <button data-adj-spd="2" data-id="${t.id}" title="Tăng 2 m/s">+2</button>
+              <button data-adj-spd="5" data-id="${t.id}" title="Tăng 5 m/s">+5</button>
+            </div>
           </div>
         </div>
-      </div>`;
-    }).join('') || '<div class="al">Không gian bay an toàn – chưa có mục tiêu.</div>';
+      </article>`;
+    }).join('') || '<div class="empty">Không gian bay an toàn – chưa có mục tiêu.</div>';
+    // Hold the list while a button inside it is pressed so the click is not lost to a re-render
+    if (!listHold) $('#list').innerHTML = listHtml;
 
-    $('#logs').innerHTML = logs.map(l => `<div class="al ${l.l}"><time>${l.t}Z</time>${l.m}</div>`).join('') || '<div class="al">Chưa có cảnh báo.</div>';
+    $('#logs').innerHTML = logs.map(l => `<div class="al ${l.l}"><time>${l.t}Z</time><span>${l.m}</span></div>`).join('') || '<div class="empty">Chưa có cảnh báo.</div>';
   }
 
   let W = 0, H = 0, S = 1, dpr = 1;
@@ -941,22 +953,34 @@ export function initEngine() {
   $('#bReset').onclick = () => { seed(); dirty = true; };
   const bSep = $('#bSep');
   if (bSep) bSep.onclick = separateTargets;
-  $('#bPlay').onclick = e => { run = !run; e.target.textContent = run ? '⏸ Tạm dừng' : '▶ Tiếp tục'; };
+  $('#bPlay').onclick = e => {
+    run = !run;
+    const b = e.currentTarget;
+    b.classList.toggle('paused', !run);
+    b.querySelector('.lbl').textContent = run ? 'Tạm dừng' : 'Tiếp tục';
+  };
   $('#sMult').onchange = e => mult = +e.target.value;
   $('#sRange').onchange = e => { range = +e.target.value; size(); };
   const vRadar = $('#vRadar');
   if (vRadar) vRadar.onclick = () => { mode = 'radar'; vRadar.className = 'on'; const vm = $('#vMap'); if (vm) vm.className = ''; };
   const vMap = $('#vMap');
   if (vMap) vMap.onclick = () => { mode = 'map'; vMap.className = 'on'; const vr = $('#vRadar'); if (vr) vr.className = ''; };
-  $('#bSnd').onclick = e => { snd = !snd; e.target.classList.toggle('on', snd); };
+  $('#bSnd').onclick = e => { snd = !snd; e.currentTarget.classList.toggle('on', snd); };
 
   const listEl = $('#list');
   if (listEl) {
+    listEl.onpointerdown = e => { if (e.target.closest('button')) listHold = true; };
+    const release = () => { if (listHold) { listHold = false; dirty = true; } };
+    window.addEventListener('pointerup', () => setTimeout(release, 0));
+    window.addEventListener('pointercancel', release);
     listEl.onclick = e => {
-      const d = e.target.dataset.del;
+      const btn = e.target.closest('button');
+      if (!btn) return;
+      const ds = btn.dataset;
+      const d = ds.del;
       if (d) { T = T.filter(t => t.id != d); dirty = true; return; }
 
-      const triggerSc = e.target.dataset.triggerSc;
+      const triggerSc = ds.triggerSc;
       if (triggerSc) {
         const t = T.find(x => x.id === triggerSc);
         if (t && t.scenario) {
@@ -965,7 +989,7 @@ export function initEngine() {
         return;
       }
 
-      const resetSc = e.target.dataset.resetSc;
+      const resetSc = ds.resetSc;
       if (resetSc) {
         const t = T.find(x => x.id === resetSc);
         if (t && t.scenario) {
@@ -974,8 +998,8 @@ export function initEngine() {
         return;
       }
 
-      const adjAlt = e.target.dataset.adjAlt;
-      const targetId = e.target.dataset.id;
+      const adjAlt = ds.adjAlt;
+      const targetId = ds.id;
       if (adjAlt && targetId) {
         const t = T.find(x => x.id === targetId);
         if (t) {
@@ -988,7 +1012,7 @@ export function initEngine() {
         return;
       }
 
-      const adjSpd = e.target.dataset.adjSpd;
+      const adjSpd = ds.adjSpd;
       if (adjSpd && targetId) {
         const t = T.find(x => x.id === targetId);
         if (t) {
