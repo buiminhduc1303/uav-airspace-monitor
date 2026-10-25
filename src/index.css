@@ -54,4 +54,16 @@ table{width:100%;border-collapse:collapse;font-size:12px}td,th{padding:5px 6px;b
 .target-subhead{display:flex;align-items:center;gap:6px;margin:3px 0 6px 0;font-size:11px}
 .hd-badge{display:inline-flex;align-items:center;gap:4px;padding:2px 7px;border-radius:4px;background:rgba(47,128,255,.12);border:1px solid rgba(47,128,255,.3);color:#b6d4fe;font:11px ui-monospace,monospace}
 .hd-badge b{color:#4dabf7;font-weight:700}
+.zone-tracker{display:inline-flex;align-items:center;gap:6px;padding:3px 6px;background:rgba(8,20,42,.7);border:1px solid var(--bd);border-radius:8px;backdrop-filter:blur(4px)}
+.zt-badge{display:inline-flex;align-items:center;gap:6px;padding:4px 9px;border-radius:6px;font-size:11px;font-weight:600;transition:all .2s ease;user-select:none}
+.zt-safe{background:rgba(25,211,140,.12);border:1px solid rgba(25,211,140,.35);color:#19d38c}
+.zt-warn{background:rgba(255,176,32,.12);border:1px solid rgba(255,176,32,.35);color:#ffb020}
+.zt-danger{background:rgba(255,77,79,.12);border:1px solid rgba(255,77,79,.35);color:#ff4d4f}
+.zt-danger.active{animation:danger-pulse 1.2s infinite ease-in-out}
+@keyframes danger-pulse{0%,100%{background:rgba(255,77,79,.15);box-shadow:0 0 0 rgba(255,77,79,0)}50%{background:rgba(255,77,79,.32);box-shadow:0 0 10px rgba(255,77,79,.65)}}
+.zt-dot{width:7px;height:7px;border-radius:50%;display:inline-block}
+.zt-safe .zt-dot{background:#19d38c;box-shadow:0 0 6px #19d38c}
+.zt-warn .zt-dot{background:#ffb020;box-shadow:0 0 6px #ffb020}
+.zt-danger .zt-dot{background:#ff4d4f;box-shadow:0 0 6px #ff4d4f}
+.zt-num{font-family:ui-monospace,Consolas,monospace;font-size:13px;font-weight:700;margin-left:2px}
 @media(max-width:900px){#app{height:auto;min-height:100%}main{grid-template-columns:1fr}.cvw{height:62vh;flex:none}aside{border-left:0;min-height:520px}}

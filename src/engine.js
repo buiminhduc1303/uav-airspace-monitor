@@ -395,13 +395,30 @@ export function initEngine() {
 
   function render() {
     const visible = T.filter(t => t.inRadar);
-    let w = 0, i = 0;
-    visible.forEach(t => { if (t.st == 3) i++; else if (t.st > 0) w++; });
+    let w = 0, i = 0, safe = 0;
+    visible.forEach(t => {
+      if (t.st == 3) i++;
+      else if (t.st > 0) w++;
+      else safe++;
+    });
+
+    const elSafe = $('#cSafe');
+    const elWarn = $('#cWarn');
+    const elDanger = $('#cDanger');
+    const ztDangerBadge = $('#ztDangerBadge');
+
+    if (elSafe) elSafe.textContent = safe;
+    if (elWarn) elWarn.textContent = w;
+    if (elDanger) elDanger.textContent = i;
+    if (ztDangerBadge) {
+      ztDangerBadge.classList.toggle('active', i > 0);
+    }
 
     $('#nT').textContent = visible.length;
     $('#nW').textContent = w;
     $('#nI').textContent = i;
-    $('#bg').textContent = i + w;
+    const bg = $('#bg');
+    if (bg) bg.textContent = i + w;
     $('#hT').textContent = 'Danh sách mục tiêu (' + visible.length + ')';
 
     $('#list').innerHTML = visible.map(t => {
@@ -903,6 +920,9 @@ export function initEngine() {
   if (bAddParallel) bAddParallel.onclick = handleAddParallel;
   const bAddParallelForm = $('#bAddParallelForm');
   if (bAddParallelForm) bAddParallelForm.onclick = handleAddParallel;
+
+  window.handleAddParallel = handleAddParallel;
+  window.separateTargets = separateTargets;
 
   $('#bAim').onclick = () => $('#fH').value = (gv('#fB') + 180) % 360;
   $('#bRnd').onclick = () => {

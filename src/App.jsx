@@ -28,8 +28,23 @@ export default function App() {
           <div className="tb">
             <button id="bPlay" className="pri">⏸ Tạm dừng</button>
             <button id="bReset">↺ Đặt lại</button>
-            <button id="bAddParallel" className="pri" title="Thêm mục tiêu UAV song song cách vùng hạn chế 3km">✈ + UAV Song song (3km)</button>
-            <button id="bSep" title="Phân tách giãn cách các mục tiêu UAV khi bị chồng lấn">↔ Tách mục tiêu</button>
+            <div className="zone-tracker" id="zoneTracker" title="Số lượng UAV theo từng phân vùng giám sát">
+              <div className="zt-badge zt-safe" title="UAV trong vùng An toàn (Không có nguy cơ xâm nhập)">
+                <span className="zt-dot"></span>
+                <span className="zt-title">An toàn</span>
+                <span className="zt-num" id="cSafe">0</span>
+              </div>
+              <div className="zt-badge zt-warn" title="UAV trong vùng Hạn chế hoặc có xu hướng tiếp cận cảnh báo">
+                <span className="zt-dot"></span>
+                <span className="zt-title">Hạn chế</span>
+                <span className="zt-num" id="cWarn">0</span>
+              </div>
+              <div className="zt-badge zt-danger" id="ztDangerBadge" title="UAV đã xâm nhập vùng cấm bay">
+                <span className="zt-dot"></span>
+                <span className="zt-title">Vùng cấm</span>
+                <span className="zt-num" id="cDanger">0</span>
+              </div>
+            </div>
             <label>Tốc độ mô phỏng <select id="sMult" defaultValue="20">
                 <option value="1">1</option>
                 <option value="5">5</option>
@@ -57,6 +72,7 @@ export default function App() {
               <div><i style={{ background: 'rgba(255,176,32,.75)' }}></i>Vùng hạn chế / cảnh báo</div>
               <div><i style={{ background: '#19d38c' }}></i>UAV an toàn (Không xu hướng xâm nhập)</div>
               <div><i style={{ background: '#ffb020' }}></i>UAV cảnh báo (Có xu hướng xâm nhập)</div>
+              <div><i style={{ background: '#ff4d4f' }}></i>UAV đã xâm nhập</div>
             </div>
             <div className="hud" id="hud">Rê chuột trên màn hình để xem toạ độ · Nhấp để chọn vị trí xuất hiện</div>
           </div>
@@ -71,7 +87,7 @@ export default function App() {
         <aside>
           <div className="tabs">
             <button className="on" data-p="p1">Mục tiêu UAV</button>
-            <button data-p="p2">Cảnh báo <span className="chip c3" id="bg">0</span></button>
+            <button data-p="p2">Cảnh báo</button>
             <button data-p="p3">Sân bay</button>
           </div>
           <div className="pane on" id="p1">
@@ -88,6 +104,7 @@ export default function App() {
             <div className="btns">
               <button className="pri" id="bAdd">+ Thêm UAV</button>
               <button id="bAddParallelForm" title="Thêm mục tiêu UAV song song cách vùng hạn chế 3km">+ UAV Song song (3km)</button>
+              <button id="bSep" title="Phân tách giãn cách các mục tiêu UAV khi bị chồng lấn">↔ Tách mục tiêu</button>
               <button id="bAim">Bay vào tâm</button>
               <button id="bRnd">Ngẫu nhiên</button>
               <button id="bClr">Xoá hết</button>
