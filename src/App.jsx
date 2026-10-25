@@ -61,8 +61,6 @@ export default function App() {
               </select>km
             </label>
             <span className="sep"></span>
-            <button id="vRadar" className="on">◎ Radar</button>
-            <button id="vMap">🗺 Bản đồ</button>
             <button id="bSnd" className="on">🔔 Âm báo</button>
           </div>
           <div className="cvw">
@@ -103,7 +101,6 @@ export default function App() {
             </div>
             <div className="btns">
               <button className="pri" id="bAdd">+ Thêm UAV</button>
-              <button id="bAim">Bay vào tâm</button>
               <button id="bRnd">Ngẫu nhiên</button>
               <button id="bClr">Xoá hết</button>
             </div>

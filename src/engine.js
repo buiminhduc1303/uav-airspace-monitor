@@ -924,7 +924,8 @@ export function initEngine() {
   window.handleAddParallel = handleAddParallel;
   window.separateTargets = separateTargets;
 
-  $('#bAim').onclick = () => $('#fH').value = (gv('#fB') + 180) % 360;
+  const bAim = $('#bAim');
+  if (bAim) bAim.onclick = () => $('#fH').value = (gv('#fB') + 180) % 360;
   $('#bRnd').onclick = () => {
     const b = Math.round(Math.random() * 359);
     mk({
@@ -943,8 +944,10 @@ export function initEngine() {
   $('#bPlay').onclick = e => { run = !run; e.target.textContent = run ? '⏸ Tạm dừng' : '▶ Tiếp tục'; };
   $('#sMult').onchange = e => mult = +e.target.value;
   $('#sRange').onchange = e => { range = +e.target.value; size(); };
-  $('#vRadar').onclick = () => { mode = 'radar'; $('#vRadar').className = 'on'; $('#vMap').className = ''; };
-  $('#vMap').onclick = () => { mode = 'map'; $('#vMap').className = 'on'; $('#vRadar').className = ''; };
+  const vRadar = $('#vRadar');
+  if (vRadar) vRadar.onclick = () => { mode = 'radar'; vRadar.className = 'on'; const vm = $('#vMap'); if (vm) vm.className = ''; };
+  const vMap = $('#vMap');
+  if (vMap) vMap.onclick = () => { mode = 'map'; vMap.className = 'on'; const vr = $('#vRadar'); if (vr) vr.className = ''; };
   $('#bSnd').onclick = e => { snd = !snd; e.target.classList.toggle('on', snd); };
 
   const listEl = $('#list');
