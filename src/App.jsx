@@ -1,7 +1,7 @@
 import React, { useEffect } from 'react';
 import {
-  Pause, Play, RotateCcw, Bell, BellOff, Gauge, Radar, Plus, Shuffle, Trash2,
-  Crosshair, AlertTriangle, PlaneLanding, MapPin, Layers, Radio, ScanEye,
+  Pause, Play, RotateCcw, Bell, BellOff, FastForward, Radar, Plus, Shuffle, Trash2,
+  Crosshair, AlertTriangle, PlaneLanding, MapPin, Layers, Radio, ScanEye, Tag, ChevronDown, Activity, Clock,
 } from 'lucide-react';
 import { initEngine } from './engine';
 
@@ -34,80 +34,89 @@ export default function App() {
         <section className="left">
           <div className="tb" role="toolbar" aria-label="Điều khiển mô phỏng">
             <div className="tb-group">
-              <button id="bPlay" className="pri" type="button">
+              <button id="bPlay" type="button" aria-pressed="false" title="Tạm dừng / tiếp tục mô phỏng">
                 <Pause className="ic i-pause" aria-hidden="true" />
                 <Play className="ic i-play" aria-hidden="true" />
                 <span className="lbl">Tạm dừng</span>
               </button>
-              <button id="bReset" type="button">
+              <button id="bReset" type="button" title="Đặt lại kịch bản mặc định" aria-label="Đặt lại">
                 <RotateCcw className="ic" aria-hidden="true" />
-                <span>Đặt lại</span>
+                <span className="lbl-collapse">Đặt lại</span>
               </button>
             </div>
 
             <span className="tb-div" aria-hidden="true"></span>
 
-            <div className="zone-tracker" id="zoneTracker" title="Số lượng UAV theo từng phân vùng giám sát">
-              <div className="zt-badge zt-safe" title="UAV trong vùng An toàn (Không có nguy cơ xâm nhập)">
-                <span className="zt-dot"></span>
+            <div className="zone-tracker" id="zoneTracker" role="group" aria-label="Lọc mục tiêu theo trạng thái">
+              <button type="button" className="zt-badge zt-safe" data-filter="s" aria-pressed="true" title="Bật/tắt hiển thị UAV an toàn (không có nguy cơ xâm nhập)">
+                <span className="zt-sym sym sym-s" aria-hidden="true"></span>
                 <span className="zt-title">An toàn</span>
                 <span className="zt-num" id="cSafe">0</span>
-              </div>
-              <div className="zt-badge zt-warn" title="UAV trong vùng Hạn chế hoặc có xu hướng tiếp cận cảnh báo">
-                <span className="zt-dot"></span>
+              </button>
+              <button type="button" className="zt-badge zt-warn" data-filter="w" aria-pressed="true" title="Bật/tắt hiển thị UAV trong vùng hạn chế hoặc có xu hướng xâm nhập">
+                <span className="zt-sym sym sym-w" aria-hidden="true"></span>
                 <span className="zt-title">Hạn chế</span>
                 <span className="zt-num" id="cWarn">0</span>
-              </div>
-              <div className="zt-badge zt-danger" id="ztDangerBadge" title="UAV đã xâm nhập vùng cấm bay">
-                <span className="zt-dot"></span>
+              </button>
+              <button type="button" className="zt-badge zt-danger" id="ztDangerBadge" data-filter="d" aria-pressed="true" title="Bật/tắt hiển thị UAV đã xâm nhập vùng cấm bay">
+                <span className="zt-sym sym sym-d" aria-hidden="true"></span>
                 <span className="zt-title">Vùng cấm</span>
                 <span className="zt-num" id="cDanger">0</span>
-              </div>
+              </button>
             </div>
 
             <span className="sep"></span>
 
-            <label className="sel" title="Tốc độ mô phỏng">
-              <Gauge className="ic" aria-hidden="true" />
-              <span className="sel-lbl">Tốc độ mô phỏng</span>
-              <select id="sMult" defaultValue="20">
-                <option value="1">1</option>
-                <option value="5">5</option>
-                <option value="20">20</option>
-                <option value="60">60</option>
-                <option value="120">120</option>
+            <label className="sel">
+              <FastForward className="ic" aria-hidden="true" />
+              <span className="sel-lbl">Tốc độ mô phỏng:</span>
+              <select id="sMult" defaultValue="20" aria-label="Tốc độ mô phỏng">
+                <option value="1">1×</option>
+                <option value="5">5×</option>
+                <option value="20">20×</option>
+                <option value="60">60×</option>
+                <option value="120">120×</option>
               </select>
-              <span className="sel-unit">×</span>
             </label>
-            <label className="sel" title="Tầm hiển thị">
-              <Radar className="ic" aria-hidden="true" />
-              <span className="sel-lbl">Tầm</span>
-              <select id="sRange" defaultValue="40">
-                <option value="10">10</option>
-                <option value="20">20</option>
-                <option value="40">40</option>
-                <option value="60">60</option>
-              </select>
-              <span className="sel-unit">km</span>
-            </label>
-            <button id="bSnd" className="on toggle" type="button" title="Bật/tắt âm báo">
+            <button id="bSnd" className="on toggle" type="button" aria-pressed="true" title="Bật/tắt âm báo">
               <Bell className="ic i-on" aria-hidden="true" />
               <BellOff className="ic i-off" aria-hidden="true" />
-              <span>Âm báo</span>
+              <span className="lbl">Âm báo: Bật</span>
             </button>
           </div>
 
           <div className="cvw">
-            <canvas id="cv"></canvas>
-            <div className="lg" aria-label="Chú giải">
-              <div className="lg-title">Chú giải</div>
-              <div><i className="sq" style={{ background: 'rgba(255,77,79,.75)' }}></i>Vùng cấm UAV</div>
-              <div><i className="sq" style={{ background: 'rgba(255,176,32,.75)' }}></i>Vùng hạn chế / cảnh báo</div>
-              <div className="lg-sep"></div>
-              <div><i className="dot" style={{ background: '#19d38c' }}></i>UAV an toàn (Không xu hướng xâm nhập)</div>
-              <div><i className="dot" style={{ background: '#ffb020' }}></i>UAV cảnh báo (Có xu hướng xâm nhập)</div>
-              <div><i className="dot" style={{ background: '#ff4d4f' }}></i>UAV đã xâm nhập</div>
+            <canvas id="cv" aria-label="Màn hình radar PPI"></canvas>
+            <div className="cv-tools">
+              <button id="bLbl" className="ov-btn on" type="button" aria-pressed="true" title="Bật/tắt nhãn rút gọn trên radar (nhãn đầy đủ vẫn hiện khi rê chuột hoặc chọn mục tiêu). Kéo nhãn để di chuyển, nhấp đúp để đặt lại.">
+                <Tag className="ic" aria-hidden="true" />
+                <span className="lbl">Nhãn: Bật</span>
+              </button>
+              <label className="sel sel-range ov-sel">
+                <Radar className="ic" aria-hidden="true" />
+                <span className="sel-lbl">Tầm:</span>
+                <select id="sRange" defaultValue="40" aria-label="Tầm hiển thị radar">
+                  <option value="10">10 km</option>
+                  <option value="20">20 km</option>
+                  <option value="40">40 km</option>
+                  <option value="60">60 km</option>
+                </select>
+              </label>
             </div>
+            <details className="lg">
+              <summary>Chú giải <ChevronDown className="ic chev" aria-hidden="true" /></summary>
+              <div className="lg-body">
+                <div><i className="zsw zsw-p"></i>Vùng cấm UAV</div>
+                <div><i className="zsw zsw-r"></i>Vùng hạn chế / cảnh báo</div>
+                <div className="lg-sep"></div>
+                <div><span className="sym sym-s"></span>UAV an toàn (Không xu hướng xâm nhập)</div>
+                <div><span className="sym sym-w"></span>UAV cảnh báo (Có xu hướng xâm nhập)</div>
+                <div><span className="sym sym-d"></span>UAV đã xâm nhập</div>
+                <div className="lg-sep"></div>
+                <div><i className="vec"></i>Vector dự báo 60 s</div>
+                <div><i className="trl"></i>Vệt lịch sử 60 s</div>
+              </div>
+            </details>
             <div className="hud-wrap">
               <Crosshair className="ic" aria-hidden="true" />
               <div className="hud" id="hud">Rê chuột trên màn hình để xem toạ độ · Nhấp để chọn vị trí xuất hiện</div>
@@ -115,9 +124,8 @@ export default function App() {
           </div>
 
           <footer className="st">
-            <span className="st-item">Mục tiêu <b id="nT">0</b></span>
-            <span className="st-item st-w">Cảnh báo <b id="nW">0</b></span>
-            <span className="st-item st-d">Xâm nhập <b id="nI">0</b></span>
+            <span className="st-item"><Activity className="ic" aria-hidden="true" />FPS <b id="fps">--</b></span>
+            <span className="st-item"><Clock className="ic" aria-hidden="true" />Cập nhật lúc <b id="upd">--:--:--</b></span>
             <span className="sep"></span>
             <span className="st-note">Mô phỏng phục vụ học tập – không dùng cho khai thác thực tế</span>
           </footer>
@@ -125,19 +133,24 @@ export default function App() {
 
         <aside>
           <div className="tabs" role="tablist">
-            <button className="on" data-p="p1" type="button" role="tab">
+            <button className="on" data-p="p1" type="button" role="tab" aria-selected="true">
               <Crosshair className="ic" aria-hidden="true" />Mục tiêu UAV
             </button>
-            <button data-p="p2" type="button" role="tab">
+            <button data-p="p2" type="button" role="tab" aria-selected="false">
               <AlertTriangle className="ic" aria-hidden="true" />Cảnh báo
             </button>
-            <button data-p="p3" type="button" role="tab">
+            <button data-p="p3" type="button" role="tab" aria-selected="false">
               <PlaneLanding className="ic" aria-hidden="true" />Sân bay
             </button>
           </div>
 
           <div className="pane on" id="p1" role="tabpanel">
-            <section className="panel">
+            <details className="panel add-form" id="addForm">
+              <summary>
+                <Plus className="ic" aria-hidden="true" />
+                <span>Thêm UAV</span>
+                <ChevronDown className="ic chev" aria-hidden="true" />
+              </summary>
               <h3>Nhập dữ liệu UAV</h3>
               <div className="fm">
                 <label className="full">Tên<input id="fN" placeholder="VD: UAV-X1" autoComplete="off" /></label>
@@ -148,6 +161,7 @@ export default function App() {
                 <label>Tốc độ tối đa (m/s)<input id="fMaxS" type="number" defaultValue="25" min="5" max="100" /></label>
                 <label>Độ cao (m)<input id="fA" type="number" defaultValue="150" min="0" max="3000" /></label>
               </div>
+              <p className="hint">Mẹo: nhấp lên radar để lấy hướng &amp; khoảng cách từ ARP.</p>
               <div className="btns">
                 <button className="pri grow" id="bAdd" type="button">
                   <Plus className="ic" aria-hidden="true" />Thêm UAV
@@ -159,9 +173,9 @@ export default function App() {
                   <Trash2 className="ic" aria-hidden="true" />Xoá hết
                 </button>
               </div>
-            </section>
+            </details>
             <h3 id="hT" className="list-head">Danh sách mục tiêu</h3>
-            <div id="list"></div>
+            <div id="list" aria-live="off"></div>
           </div>
 
           <div className="pane" id="p2" role="tabpanel">
@@ -199,7 +213,7 @@ export default function App() {
                 <tbody>
                   <tr><th><i className="zdot zd-p"></i>Vùng cấm UAV</th><td>32,8 × 10,4 km (dọc trục đường băng 069°)</td></tr>
                   <tr><th><i className="zdot zd-r"></i>Vùng hạn chế / cảnh báo</th><td>46,8 × 19,4 km (mở rộng quanh vùng cấm)</td></tr>
-                  <tr><th>Dự báo xâm nhập</th><td>Cảnh báo sớm khi ETA ≤ 180 s</td></tr>
+                  <tr><th>Dự báo xâm nhập</th><td>Cảnh báo sớm khi ETA ≤ <span id="tWarn">300</span> s</td></tr>
                 </tbody>
               </table>
             </section>
@@ -217,8 +231,8 @@ export default function App() {
               <h3><ScanEye className="ic" aria-hidden="true" />Cấp độ nhận dạng mục tiêu</h3>
               <table className="kv">
                 <tbody>
-                  <tr><th>Chỉ phủ Radar</th><td>Hiển thị: <code>UNKNOWN</code></td></tr>
-                  <tr><th>Phủ Radar + RF</th><td>Hiển thị: <code>PROBABLE [Tên dự đoán]</code></td></tr>
+                  <tr><th>Chỉ phủ Radar</th><td>Hiển thị: <code>[Tên] · chưa nhận dạng</code></td></tr>
+                  <tr><th>Phủ Radar + RF</th><td>Hiển thị: <code>[Tên] · dự đoán</code></td></tr>
                   <tr><th>Phủ Camera EO/IR/PTZ</th><td>Nhận dạng chính xác: <code>[Tên mục tiêu cụ thể]</code></td></tr>
                 </tbody>
               </table>

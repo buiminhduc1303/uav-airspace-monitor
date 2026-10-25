@@ -1,6 +1,16 @@
+import { bearing, pointInPolygon, distToPolygon, rayEta, classify, fmtDist, fmtClock } from './geometry.js';
+
+// Early-warning horizon: a track whose current vector reaches a zone within WARN_T seconds is "warning"
+export const WARN_T = 300;
+const TICK = 0.25;      // real seconds between data ticks (derived values, cards, labels)
+const TRAIL_SEC = 60;   // history trail length, simulated seconds
+const VECTOR_SEC = 60;  // prediction vector length, simulated seconds
+
 export function initEngine() {
   if (window.__rafId) cancelAnimationFrame(window.__rafId);
   if (window.__intId) clearInterval(window.__intId);
+  window.__engineAbort?.abort();
+  const { signal } = window.__engineAbort = new AbortController();
 
   const $ = s => document.querySelector(s);
   const cv = $('#cv');
@@ -72,25 +82,40 @@ export function initEngine() {
   ];
 
   const SN = ['AN TOÀN', 'CẢNH BÁO', 'VÙNG HẠN CHẾ', 'VÙNG CẤM'];
-  const SC = ['#19d38c', '#ffb020', '#ffb020', '#ff4d4f'];
+  const IDN = { unknown: 'chưa nhận dạng', probable: 'dự đoán', confirmed: '' };
 
-  let listHold = false, T = [], seq = 0, run = true, mult = 20, range = 40, mode = 'radar', snd = true, logs = [], last = performance.now(), sw = 0, dirty = true, ac, acc = 0;
+  // Zones as polygons in the ENU frame (rotated rectangles along the 069° runway axis)
+  const corners = z => [[z.a0, z.c0], [z.a1, z.c0], [z.a1, z.c1], [z.a0, z.c1]].map(([a, c]) => { const p = toXY(a, c); return [p.x, p.y]; });
+  const PP = corners(ZP), PR = corners(ZR);
 
-  const dz = (z, x, y) => {
-    const a = x * U.x + y * U.y, c = x * V.x + y * V.y;
-    return Math.hypot(Math.max(z.a0 - a, 0, a - z.a1), Math.max(z.c0 - c, 0, c - z.c1));
+  // Colours come from CSS variables so the page and the canvas share one palette
+  const css = (n, f) => getComputedStyle(document.documentElement).getPropertyValue(n).trim() || f;
+  const C = {
+    safe: css('--c-safe', '#19d38c'),
+    warn: css('--c-warn', '#ffb020'),
+    danger: css('--c-danger', '#ff4d4f'),
+    select: css('--c-select', '#7dd3fc'),
+    sweep: css('--c-sweep-rgb', '150,220,235'),
+    ring: css('--c-ring-rgb', '96,170,200'),
+    text: css('--c-radar-text', '#c9d6ea'),
+    labelBg: css('--c-label-bg', 'rgba(6,12,24,.9)')
   };
-
-  const eta = (z, t) => {
-    if (dz(z, t.x, t.y) == 0) return 0;
-    const vx = t.s * Math.sin(t.h * D), vy = t.s * Math.cos(t.h * D);
-    for (let s = 2; s <= 3600; s += 2) {
-      if (dz(z, t.x + vx * s, t.y + vy * s) == 0) return s;
-    }
-    return null;
+  const rgba = (hex, a) => {
+    const n = parseInt(hex.slice(1), 16);
+    return `rgba(${n >> 16 & 255},${n >> 8 & 255},${n & 255},${a})`;
   };
+  const cat = st => st === 3 ? 'd' : st >= 1 ? 'w' : 's';
+  const colOf = st => st === 3 ? C.danger : st >= 1 ? C.warn : C.safe;
+  const pad3 = v => String(Math.round(v) % 360).padStart(3, '0');
+  const fullName = t => t.identity && t.identity !== 'confirmed' ? `${t.name} · ${IDN[t.identity]}` : t.name;
+  const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
 
-  const fm = m => m >= 1000 ? (m / 1000).toFixed(2) + ' km' : Math.round(m) + ' m';
+  let listHold = false, T = [], seq = 0, run = true, mult = 20, range = 40, snd = true, logs = [], last = performance.now(), sw = 0, dirty = true, ac, acc = 0, simT = 0;
+  let selId = null, flashAt = 0, hoverId = null, showLabels = true, drag = null, dragMoved = false;
+  let frames = 0, fpsAcc = 0;
+  const filt = { s: true, w: true, d: true };
+  const lblOff = {}; // label offsets dragged by the user, keyed by target id
+
   const hm = () => new Date().toISOString().substr(11, 8);
 
   function beep(f, d) {
@@ -104,7 +129,7 @@ export function initEngine() {
       g.connect(ac.destination);
       o.start();
       o.stop(ac.currentTime + d);
-    } catch (e) { }
+    } catch { /* audio unavailable */ }
   }
 
   function log(l, m) {
@@ -114,13 +139,15 @@ export function initEngine() {
     if (l != 'i') beep(l == 'd' ? 1000 : 700, .2);
   }
 
+  const inRadarCover = (x, y) => radars.some(r => Math.hypot(x - r.x, y - r.y) <= r.r);
+
   function mk(o) {
     const id = 'UAV-' + String(++seq).padStart(3, '0');
     let x, y, bDeg, dKm;
     if (o.x !== undefined && o.y !== undefined) {
       x = o.x;
       y = o.y;
-      bDeg = Math.round((Math.atan2(x, y) / D + 360) % 360);
+      bDeg = Math.round(bearing(x, y));
       dKm = (Math.hypot(x, y) / 1000).toFixed(1);
     } else {
       bDeg = Math.round(((o.b ?? 0) % 360 + 360) % 360);
@@ -130,11 +157,10 @@ export function initEngine() {
       y = r * Math.cos(bRad);
     }
 
-    const inRadar = radars.some(rad => Math.hypot(x - rad.x, y - rad.y) <= rad.r);
     const actualName = (o.n || id).replace(/[<>&"]/g, '');
 
     // Nếu mục tiêu ra khỏi tầm phủ Radar thì biến mất khỏi hệ thống
-    if (!inRadar) {
+    if (!inRadarCover(x, y)) {
       log('w', `Mục tiêu ${actualName} ngoài tầm phủ Radar (${dKm} km) – biến mất khỏi hệ thống`);
       return null;
     }
@@ -143,10 +169,11 @@ export function initEngine() {
     const maxSpeed = o.maxSpeed || Math.max(initialSpeed, 25);
     const isParallel = !!o.isParallel;
 
+    // id and name are fixed for the whole life of the track; identity is tracked separately
     const t = {
       id,
       name: actualName,
-      dispName: 'UNKNOWN',
+      identity: null,
       sensorLevel: 'none',
       sensorLabel: 'NGOÀI TẦM',
       x,
@@ -159,10 +186,9 @@ export function initEngine() {
       tr: [],
       st: -1,
       w: false,
-      wR: false,
+      inPAt: null,
       inRadar: true,
-      wasInRadar: true,
-      an: {},
+      dv: null,
       isParallel,
       scenario: o.scenario || (isParallel ? {
         phase: 'parallel',
@@ -181,6 +207,7 @@ export function initEngine() {
 
     T.push(t);
     log('i', `Mục tiêu ${actualName} (${id}) xuất hiện trong tầm Radar – hướng ${bDeg}°, cách ARP ${dKm} km, cao ${t.alt} m, hướng ${Math.round(t.h)}°, ${t.s} m/s`);
+    derive(t);
     return t;
   }
 
@@ -247,9 +274,8 @@ export function initEngine() {
     sc.elapsed = sc.delay;
     sc.accelStartTime = sc.delay + 3;
     sc.maxSpeedLogged = false;
-    dirty = true;
-    log('w', `🔄 [Kịch bản] ${t.dispName} (${t.id}) đổi hướng bay (${Math.round(oldH)}° → ${Math.round(t.h)}°) và giảm vận tốc 4.5 m/s (${oldS} m/s → ${t.s} m/s)`);
-    render();
+    log('w', `🔄 [Kịch bản] ${t.name} (${t.id}) đổi hướng bay (${Math.round(oldH)}° → ${Math.round(t.h)}°) và giảm vận tốc 4.5 m/s (${oldS} m/s → ${t.s} m/s)`);
+    tick();
   }
 
   function resetParallelUAV(t) {
@@ -263,19 +289,17 @@ export function initEngine() {
     t.h = sc.originalHeading;
     t.s = sc.initialSpeed;
     t.tr = [];
-    t.st = 0;
     t.w = false;
-    t.wR = false;
     sc.phase = 'parallel';
     sc.elapsed = 0;
     sc.maxSpeedLogged = false;
-    dirty = true;
-    log('i', `↺ [Kịch bản] ${t.dispName} (${t.id}) đặt lại bay song song cách vùng hạn chế 3.00 km (${t.s} m/s, hướng 069°)`);
-    render();
+    log('i', `↺ [Kịch bản] ${t.name} (${t.id}) đặt lại bay song song cách vùng hạn chế 3.00 km (${t.s} m/s, hướng 069°)`);
+    tick();
   }
 
   function seed() {
-    T = []; seq = 0; logs = [];
+    T = []; seq = 0; logs = []; selId = null; hoverId = null;
+    Object.keys(lblOff).forEach(k => delete lblOff[k]);
     // Mục tiêu UAV bay song song cách vùng hạn chế 3km (Đường xanh, tên giống UAV khác: UAV-X5)
     addParallelUAV({
       name: 'UAV-X5',
@@ -293,136 +317,122 @@ export function initEngine() {
     mk({ n: 'SPARROW', b: 210, d: 25, h: 45, s: 15, maxSpeed: 20, a: 30 });
   }
 
-  function an(t) {
-    const inRadar = radars.some(r => Math.hypot(t.x - r.x, t.y - r.y) <= r.r);
+  // Single source of truth: every tick computes t.dv once; radar labels and cards only read it
+  function derive(t) {
     const inRF = rfStations.some(s => Math.hypot(t.x - s.x, t.y - s.y) <= s.r);
     const inCamera = cameras.some(c => Math.hypot(t.x - c.x, t.y - c.y) <= c.r);
+    t.inRadar = inRadarCover(t.x, t.y);
 
-    t.inRadar = inRadar;
-    t.inRF = inRF;
-    t.inCamera = inCamera;
-
-    const b = (Math.atan2(t.x, t.y) / D + 360) % 360;
-    const d = Math.hypot(t.x, t.y);
-
-    // If outside radar coverage: target is invisible and untracked
-    if (!inRadar) {
-      t.dispName = 'UNKNOWN';
-      t.sensorLevel = 'none';
-      t.sensorLabel = 'NGOÀI TẦM';
-      t.an = { eP: null, eR: null, dP: dz(ZP, t.x, t.y), dR: dz(ZR, t.x, t.y), d, b };
-      t.st = 0;
-      return 0;
+    const identity = inCamera ? 'confirmed' : inRF ? 'probable' : 'unknown';
+    t.sensorLevel = inCamera ? 'cam' : inRF ? 'rf' : 'radar';
+    t.sensorLabel = inCamera ? 'EO/IR' : inRF ? 'RADAR + RF' : 'RADAR';
+    if (t.identity && t.identity !== identity) {
+      if (identity === 'confirmed') log('i', `📷 Camera EO/IR nhận dạng chính xác mục tiêu: ${t.name} (${t.id})`);
+      else if (identity === 'probable' && t.identity === 'unknown') log('i', `📶 Trạm RF phát hiện tín hiệu: PROBABLE ${t.name} (${t.id})`);
     }
+    t.identity = identity;
 
-    let dispName, sensorLevel, sensorLabel;
-    if (inCamera) {
-      dispName = t.name;
-      sensorLevel = 'cam';
-      sensorLabel = 'EO/IR';
-    } else if (inRF) {
-      dispName = 'PROBABLE ' + t.name;
-      sensorLevel = 'rf';
-      sensorLabel = 'RADAR + RF';
-    } else {
-      dispName = 'UNKNOWN';
-      sensorLevel = 'radar';
-      sensorLabel = 'RADAR';
-    }
+    const vx = t.s * Math.sin(t.h * D), vy = t.s * Math.cos(t.h * D);
+    const inP = pointInPolygon(t.x, t.y, PP), inR = pointInPolygon(t.x, t.y, PR);
+    const eP = rayEta(t.x, t.y, vx, vy, PP), eR = rayEta(t.x, t.y, vx, vy, PR);
+    const st = classify({ inP, inR, etaP: eP, etaR: eR }, WARN_T);
+    if (inP && t.inPAt == null) t.inPAt = simT;
+    if (!inP) t.inPAt = null;
 
-    t.dispName = dispName;
-    t.sensorLevel = sensorLevel;
-    t.sensorLabel = sensorLabel;
-
-    // Log when target enters radar coverage for the first time
-    if (!t.wasInRadar) {
-      t.wasInRadar = true;
-      log('i', `📡 Radar phát hiện mục tiêu xuất hiện: ${dispName} (${t.id}) – cách ARP ${fm(d)}, cao ${t.alt} m, ${t.s} m/s`);
-    }
-
-    if (t.prevSensorLevel !== undefined && t.prevSensorLevel !== sensorLevel) {
-      if (sensorLevel === 'cam') {
-        log('i', `📷 Camera EO/IR nhận dạng chính xác mục tiêu: ${t.name} (${t.id})`);
-      } else if (sensorLevel === 'rf' && t.prevSensorLevel === 'radar') {
-        log('i', `📶 Trạm RF phát hiện tín hiệu: PROBABLE ${t.name} (${t.id})`);
-      }
-    }
-    t.prevSensorLevel = sensorLevel;
-
-    const eP = eta(ZP, t), eR = eta(ZR, t), dP = dz(ZP, t.x, t.y), dR = dz(ZR, t.x, t.y);
-    const m = Math.min(eP ?? 1e9, eR ?? 1e9);
-
-    // Check if heading towards restricted zone and distance <= 3000m
-    const approachingRestricted = eR !== null && dR > 0 && dR <= 3000;
-
-    // For parallel flying target in safe phase, enforce st = 0
-    let st;
-    if (t.isParallel && t.scenario && t.scenario.phase === 'parallel') {
-      st = 0;
-    } else {
-      st = dP == 0 ? 3 : dR == 0 ? 2 : (m <= 180 || approachingRestricted) ? 1 : 0;
-    }
-    t.an = { eP, eR, dP, dR, d, b };
+    const dv = {
+      distanceArp: Math.hypot(t.x, t.y),
+      bearingArp: bearing(t.x, t.y),
+      distToProhibited: distToPolygon(t.x, t.y, PP),
+      distToRestricted: distToPolygon(t.x, t.y, PR),
+      etaProhibited: eP == null ? null : Math.round(eP),
+      etaRestricted: eR == null ? null : Math.round(eR),
+      inProhibitedFor: inP ? simT - t.inPAt : 0,
+      inP,
+      inR,
+      status: st,
+      alt: t.alt,
+      speed: t.s,
+      heading: t.h
+    };
+    t.dv = dv;
 
     if (st != t.st) {
-      if (st == 3) log('d', `⚠ ${t.dispName} (${t.id}) ĐÃ XÂM NHẬP VÙNG CẤM BAY – cao ${t.alt} m, ${t.s} m/s`);
-      else if (st == 2) log('w', `${t.dispName} (${t.id}) vào vùng hạn chế bay`);
+      if (st == 3) log('d', `⚠ ${t.name} (${t.id}) ĐÃ XÂM NHẬP VÙNG CẤM BAY – cao ${t.alt} m, ${t.s} m/s`);
+      else if (st == 2) log('w', `${t.name} (${t.id}) vào vùng hạn chế bay`);
       else if (st == 1) {
-        if (approachingRestricted) {
-          log('w', `${t.dispName} (${t.id}) tiến gần vùng hạn chế (cách ${fm(dR)}) – nguy cơ xâm nhập`);
-        } else {
-          log('w', `${t.dispName} (${t.id}) có nguy cơ xâm nhập – dự báo ${m}s`);
-        }
+        const m = Math.min(dv.etaProhibited ?? 1e9, dv.etaRestricted ?? 1e9);
+        log('w', `${t.name} (${t.id}) có nguy cơ xâm nhập – dự báo ${fmtClock(m)} nữa vào ${dv.etaRestricted === m ? 'vùng hạn chế' : 'vùng cấm'}`);
       }
-      else if (t.st >= 0) log('i', `${t.dispName} (${t.id}) trở lại trạng thái an toàn`);
+      else if (t.st >= 0) log('i', `${t.name} (${t.id}) trở lại trạng thái an toàn`);
       t.st = st;
     }
 
-    if (approachingRestricted && !t.wR) {
-      t.wR = true;
-      if (st == 1) log('w', `${t.dispName} (${t.id}) đang tiến sát vùng hạn chế (cách ${fm(dR)})`);
-    }
-    if (!approachingRestricted) t.wR = false;
-
     if (eP && eP <= 60 && !t.w) {
       t.w = true;
-      log('d', `${t.dispName} (${t.id}) ở hướng ${Math.round(t.an.b)}°, cách vùng cấm ${fm(dP)}, cao ${t.alt} m, ${t.s} m/s, khoảng ${eP}s nữa xâm nhập`);
+      log('d', `${t.name} (${t.id}) ở hướng ${Math.round(dv.bearingArp)}°, cách vùng cấm ${fmtDist(dv.distToProhibited)}, cao ${t.alt} m, ${t.s} m/s, khoảng ${dv.etaProhibited}s nữa xâm nhập`);
     }
     if (eP === null || eP > 90) t.w = false;
+  }
 
-    return st;
+  function etaText(dv) {
+    if (dv.inP) return { txt: 'Đã vào · ' + fmtClock(dv.inProhibitedFor), tip: 'Thời gian mục tiêu đã ở trong vùng cấm' };
+    if (dv.etaProhibited == null) return { txt: '—', tip: 'Không hướng vào vùng' };
+    return { txt: fmtClock(dv.etaProhibited), tip: 'Thời gian dự kiến tới vùng cấm (mm:ss)' };
+  }
+
+  const threat = (a, b) => {
+    const ra = a.dv.status === 3 ? 0 : a.dv.status >= 1 ? 1 : 2, rb = b.dv.status === 3 ? 0 : b.dv.status >= 1 ? 1 : 2;
+    if (ra !== rb) return ra - rb;
+    if (ra === 0) return b.dv.inProhibitedFor - a.dv.inProhibitedFor;
+    if (ra === 1) {
+      const ea = Math.min(a.dv.etaProhibited ?? Infinity, a.dv.etaRestricted ?? Infinity);
+      const eb = Math.min(b.dv.etaProhibited ?? Infinity, b.dv.etaRestricted ?? Infinity);
+      if (ea !== eb) return ea - eb;
+    }
+    return a.dv.distanceArp - b.dv.distanceArp;
+  };
+
+  const shown = () => T.filter(t => t.inRadar && t.dv && filt[cat(t.dv.status)]);
+
+  function tick() {
+    T.forEach(derive);
+    $('#upd').textContent = hm() + 'Z';
+    render();
   }
 
   function render() {
-    const visible = T.filter(t => t.inRadar);
+    const all = T.filter(t => t.inRadar && t.dv);
     let w = 0, i = 0, safe = 0;
-    visible.forEach(t => {
-      if (t.st == 3) i++;
-      else if (t.st > 0) w++;
+    all.forEach(t => {
+      if (t.dv.status == 3) i++;
+      else if (t.dv.status > 0) w++;
       else safe++;
     });
 
-    const elSafe = $('#cSafe');
-    const elWarn = $('#cWarn');
-    const elDanger = $('#cDanger');
-    const ztDangerBadge = $('#ztDangerBadge');
+    $('#cSafe').textContent = safe;
+    $('#cWarn').textContent = w;
+    $('#cDanger').textContent = i;
+    $('#ztDangerBadge').classList.toggle('active', i > 0);
 
-    if (elSafe) elSafe.textContent = safe;
-    if (elWarn) elWarn.textContent = w;
-    if (elDanger) elDanger.textContent = i;
-    if (ztDangerBadge) {
-      ztDangerBadge.classList.toggle('active', i > 0);
-    }
-
-    $('#nT').textContent = visible.length;
-    $('#nW').textContent = w;
-    $('#nI').textContent = i;
-    const bg = $('#bg');
-    if (bg) bg.textContent = i + w;
-    $('#hT').textContent = 'Danh sách mục tiêu (' + visible.length + ')';
+    const visible = shown().sort(threat);
+    $('#hT').textContent = 'Danh sách mục tiêu (' + (visible.length === all.length ? visible.length : visible.length + '/' + all.length) + ')';
 
     const listHtml = visible.map(t => {
-      const a = t.an || {};
+      const a = t.dv;
+      const open = t.id === selId;
+      const e = etaText(a);
+      const sym = `<span class="sym sym-${cat(a.status)}" aria-hidden="true"></span>`;
+      const row = `<div class="cr" data-sel="${t.id}" role="button" tabindex="0" aria-expanded="${open}" title="${open ? 'Thu gọn' : 'Xem chi tiết & điều chỉnh'}">
+          ${sym}
+          <b class="cn">${t.name}</b>
+          <span class="chip c${a.status}">${SN[a.status]}</span>
+          <span class="cv">${fmtDist(a.distanceArp)}</span>
+          <span class="cv">${a.alt} m</span>
+          <span class="cv eta${a.inP ? ' in' : ''}" title="${e.tip}">${a.inP ? e.txt : 'ETA ' + e.txt}</span>
+          <svg class="chev" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="m6 9 6 6 6-6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        </div>`;
+      if (!open) return `<article class="card s${a.status}" data-card-id="${t.id}">${row}</article>`;
+
       const sc = t.scenario;
       let scHtml = '';
       if (sc) {
@@ -430,14 +440,13 @@ export function initEngine() {
         let statusText = '';
         if (sc.phase === 'parallel') {
           const rem = Math.max(0, Math.ceil(sc.delay - sc.elapsed));
-          badgeClass = 'sc-safe';
           statusText = `🟢 Bay song song 3km (An toàn · Đổi hướng & giảm vận tốc sau ${rem}s)`;
         } else if (sc.phase === 'turning') {
           badgeClass = 'sc-warn';
-          statusText = `🟡 Đã đổi hướng (${Math.round(t.h)}°) & Giảm tốc (-${sc.speedDrop} m/s: ${t.s} m/s)`;
+          statusText = `🟡 Đã đổi hướng (${Math.round(a.heading)}°) & Giảm tốc (-${sc.speedDrop} m/s: ${a.speed} m/s)`;
         } else {
           badgeClass = 'sc-accel';
-          statusText = `⚡ Đang tăng tốc (${t.s} m/s)`;
+          statusText = `⚡ Đang tăng tốc (${a.speed} m/s)`;
         }
         scHtml = `
           <div class="sc-box">
@@ -445,75 +454,94 @@ export function initEngine() {
             <div class="sc-actions">
               ${sc.phase === 'parallel'
                 ? `<button class="sc-btn pri" data-trigger-sc="${t.id}" title="Kích hoạt đổi hướng và giảm vận tốc ngay">⚡ Đổi hướng & Giảm tốc ngay</button>`
-                : `<button class="sc-btn" data-reset-sc="${t.id}" title="Đặt lại về vị trí song song 3km ban đầu">↺ Đặt lại song song 3km</button>`
+                : `<button class="sc-btn" data-reset-sc="${t.id}" title="Đưa mục tiêu về điểm xuất phát ban đầu: bay song song trục đường băng 069°, cách biên vùng hạn chế 3 km, khôi phục vận tốc ban đầu và chạy lại kịch bản đổi hướng sau ${sc.delay}s">↺ Chạy lại kịch bản bay song song</button>`
               }
             </div>
           </div>
         `;
       }
 
-      const hd = t.h.toFixed(0);
-      return `<article class="card s${t.st}" data-card-id="${t.id}">
-        <div class="ch">
-          <span class="ch-dot"></span>
-          <div class="ch-name"><b>${t.dispName}</b><span class="id">${t.id}</span></div>
-          <button class="icon-btn" data-del="${t.id}" title="Xoá" aria-label="Xoá ${t.id}"><svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button>
-        </div>
-        <div class="target-subhead">
-          <span class="chip c${t.st}">${SN[t.st]}</span>
-          <span class="chip sens-${t.sensorLevel}">${t.sensorLabel}</span>
-          <span class="hd-badge"><svg viewBox="0 0 24 24" width="12" height="12" style="transform:rotate(${hd}deg)" aria-hidden="true"><path d="M12 2 19 21 12 17 5 21Z" fill="currentColor"/></svg>Hướng bay: <b>${hd}°</b></span>
-        </div>
-        <div class="gr">
-          <span>CÁCH ARP<b>${fm(a.d)}</b></span>
-          <span>BRG TỪ ARP<b>${a.b !== undefined ? a.b.toFixed(0) : '--'}°</b></span>
-          <span>ĐỘ CAO<b>${t.alt} m</b></span>
-          <span>TỐC ĐỘ<b>${t.s} m/s</b></span>
-          <span>HƯỚNG BAY<b>${hd}°</b></span>
-          <span class="m-p">CÁCH VÙNG CẤM<b>${fm(a.dP)}</b></span>
-          <span class="m-r">CÁCH VÙNG HẠN CHẾ<b>${fm(a.dR)}</b></span>
-          <span class="span-2 m-eta">ETA VÙNG CẤM<b>${a.eP === 0 ? 'ĐÃ VÀO' : a.eP == null ? '--' : a.eP + ' s'}</b></span>
-        </div>
-        ${scHtml}
-        <div class="c-adj">
-          <div class="adj-grp">
-            <span class="adj-lbl">Độ cao</span>
-            <div class="adj-btns">
-              <button data-adj-alt="-50" data-id="${t.id}" title="Giảm 50m">-50m</button>
-              <button data-adj-alt="-20" data-id="${t.id}" title="Giảm 20m">-20m</button>
-              <button data-adj-alt="-10" data-id="${t.id}" title="Giảm 10m">-10m</button>
-            </div>
-            <b>${t.alt} m</b>
-            <div class="adj-btns">
-              <button data-adj-alt="10" data-id="${t.id}" title="Tăng 10m">+10m</button>
-              <button data-adj-alt="20" data-id="${t.id}" title="Tăng 20m">+20m</button>
-              <button data-adj-alt="50" data-id="${t.id}" title="Tăng 50m">+50m</button>
-            </div>
+      // Keep the flash animation running across re-renders by offsetting it with a negative delay
+      const fl = performance.now() - flashAt;
+      const flash = fl < 1200 ? ` flash" style="animation-delay:-${Math.round(fl)}ms` : "";
+      return `<article class="card s${a.status} open${flash}" data-card-id="${t.id}">
+        ${row}
+        <div class="cd">
+          <div class="target-subhead">
+            <span class="idn">${t.identity !== 'confirmed' ? IDN[t.identity] : 'đã nhận dạng'} · ${t.id}</span>
+            <span class="chip sens-${t.sensorLevel}">${t.sensorLabel}</span>
+            <button class="icon-btn" data-del="${t.id}" title="Xoá mục tiêu" aria-label="Xoá ${t.name}"><svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M3 6h18M8 6V4h8v2m-9 0 1 14h8l1-14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
           </div>
-          <div class="adj-grp">
-            <span class="adj-lbl">Tốc độ</span>
-            <div class="adj-btns">
-              <button data-adj-spd="-5" data-id="${t.id}" title="Giảm 5 m/s">-5</button>
-              <button data-adj-spd="-2" data-id="${t.id}" title="Giảm 2 m/s">-2</button>
-              <button data-adj-spd="-1" data-id="${t.id}" title="Giảm 1 m/s">-1</button>
+          <div class="gr">
+            <span>CÁCH ARP<b>${fmtDist(a.distanceArp)}</b></span>
+            <span>BRG TỪ ARP<b>${pad3(a.bearingArp)}°</b></span>
+            <span>ĐỘ CAO<b>${a.alt} m</b></span>
+            <span>TỐC ĐỘ<b>${a.speed} m/s</b></span>
+            <span>HƯỚNG BAY<b>${pad3(a.heading)}°</b></span>
+            <span class="m-p">ĐẾN VÙNG CẤM<b>${fmtDist(a.distToProhibited)}</b></span>
+            <span class="m-r">ĐẾN VÙNG HẠN CHẾ<b>${fmtDist(a.distToRestricted)}</b></span>
+            <span class="span-2 m-eta" title="${e.tip}">ETA VÙNG CẤM<b>${e.txt}</b></span>
+          </div>
+          ${scHtml}
+          <div class="c-adj">
+            <div class="adj-grp">
+              <span class="adj-lbl">Độ cao</span>
+              <div class="adj-btns">
+                <button data-adj-alt="-50" data-id="${t.id}" title="Giảm 50m">-50m</button>
+                <button data-adj-alt="-20" data-id="${t.id}" title="Giảm 20m">-20m</button>
+                <button data-adj-alt="-10" data-id="${t.id}" title="Giảm 10m">-10m</button>
+              </div>
+              <b>${a.alt} m</b>
+              <div class="adj-btns">
+                <button data-adj-alt="10" data-id="${t.id}" title="Tăng 10m">+10m</button>
+                <button data-adj-alt="20" data-id="${t.id}" title="Tăng 20m">+20m</button>
+                <button data-adj-alt="50" data-id="${t.id}" title="Tăng 50m">+50m</button>
+              </div>
             </div>
-            <b>${t.s} m/s</b>
-            <div class="adj-btns">
-              <button data-adj-spd="1" data-id="${t.id}" title="Tăng 1 m/s">+1</button>
-              <button data-adj-spd="2" data-id="${t.id}" title="Tăng 2 m/s">+2</button>
-              <button data-adj-spd="5" data-id="${t.id}" title="Tăng 5 m/s">+5</button>
+            <div class="adj-grp">
+              <span class="adj-lbl">Tốc độ</span>
+              <div class="adj-btns">
+                <button data-adj-spd="-5" data-id="${t.id}" title="Giảm 5 m/s">-5</button>
+                <button data-adj-spd="-2" data-id="${t.id}" title="Giảm 2 m/s">-2</button>
+                <button data-adj-spd="-1" data-id="${t.id}" title="Giảm 1 m/s">-1</button>
+              </div>
+              <b>${a.speed} m/s</b>
+              <div class="adj-btns">
+                <button data-adj-spd="1" data-id="${t.id}" title="Tăng 1 m/s">+1</button>
+                <button data-adj-spd="2" data-id="${t.id}" title="Tăng 2 m/s">+2</button>
+                <button data-adj-spd="5" data-id="${t.id}" title="Tăng 5 m/s">+5</button>
+              </div>
             </div>
           </div>
         </div>
       </article>`;
-    }).join('') || '<div class="empty">Không gian bay an toàn – chưa có mục tiêu.</div>';
+    }).join('') || `<div class="empty">${all.length ? 'Không có mục tiêu khớp bộ lọc.' : 'Không gian bay an toàn – chưa có mục tiêu.'}</div>`;
+
     // Hold the list while a button inside it is pressed so the click is not lost to a re-render
-    if (!listHold) $('#list').innerHTML = listHtml;
+    if (!listHold) {
+      const listEl = $('#list');
+      const focusSel = document.activeElement?.closest?.('#list [data-sel]')?.dataset.sel;
+      // FLIP: animate cards that moved after re-sorting instead of letting them jump
+      const before = {};
+      listEl.querySelectorAll('.card').forEach(c => { before[c.dataset.cardId] = c.getBoundingClientRect().top; });
+      listEl.innerHTML = listHtml;
+      if (focusSel) listEl.querySelector(`[data-sel="${focusSel}"]`)?.focus({ preventScroll: true });
+      if (!reduceMotion) {
+        listEl.querySelectorAll('.card').forEach(c => {
+          const prev = before[c.dataset.cardId];
+          const dy = prev == null ? 0 : prev - c.getBoundingClientRect().top;
+          if (Math.abs(dy) > 2) c.animate([{ transform: `translateY(${dy}px)` }, { transform: 'none' }], { duration: 280, easing: 'cubic-bezier(.2,.7,.3,1)' });
+        });
+      }
+    }
 
     $('#logs').innerHTML = logs.map(l => `<div class="al ${l.l}"><time>${l.t}Z</time><span>${l.m}</span></div>`).join('') || '<div class="empty">Chưa có cảnh báo.</div>';
   }
 
-  let W = 0, H = 0, S = 1, dpr = 1;
+  // ---------------------------------------------------------------------------
+  // Radar rendering
+  // ---------------------------------------------------------------------------
+  let W = 0, H = 0, S = 1, dpr = 1, hatch = null;
 
   function size() {
     dpr = devicePixelRatio || 1;
@@ -527,253 +555,341 @@ export function initEngine() {
   const sx = x => W / 2 + x * S;
   const sy = y => H / 2 - y * S;
 
-  function poly(z, fill, stroke) {
-    g.beginPath();
-    [[z.a0, z.c0], [z.a1, z.c0], [z.a1, z.c1], [z.a0, z.c1]].forEach(([a, c], k) => {
-      const x = sx(a * U.x + c * V.x), y = sy(a * U.y + c * V.y);
-      k ? g.lineTo(x, y) : g.moveTo(x, y);
-    });
-    g.closePath();
-    g.fillStyle = fill;
-    g.fill();
-    g.strokeStyle = stroke;
-    g.setLineDash([8, 5]);
-    g.lineWidth = 1.5;
-    g.stroke();
-    g.setLineDash([]);
+  function makeHatch() {
+    const p = document.createElement('canvas');
+    p.width = p.height = 10;
+    const q = p.getContext('2d');
+    q.strokeStyle = rgba(C.danger, .35);
+    q.lineWidth = 1.2;
+    q.beginPath(); q.moveTo(0, 10); q.lineTo(10, 0); q.moveTo(-5, 5); q.lineTo(5, -5); q.moveTo(5, 15); q.lineTo(15, 5); q.stroke();
+    return g.createPattern(p, 'repeat');
   }
 
-  function draw() {
+  function polyPath(pts) {
+    g.beginPath();
+    pts.forEach(([x, y], k) => k ? g.lineTo(sx(x), sy(y)) : g.moveTo(sx(x), sy(y)));
+    g.closePath();
+  }
+
+  const FONT = '12px "JetBrains Mono", ui-monospace, Consolas, monospace';
+  const FONT_B = '600 ' + FONT;
+  const LH = 16; // 12px × 1.35 line-height, rounded
+  const PADX = 8, PADY = 5;
+  const DIRS = [[0, -1], [1, -1], [1, 0], [1, 1], [0, 1], [-1, 1], [-1, 0], [-1, -1]]; // N NE E SE S SW W NW
+  const DISTS = [30, 50, 70];
+
+  const overlap = (a, b) => Math.max(0, Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x)) * Math.max(0, Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y));
+
+  function boxAt(x, y, w, h, di, r) {
+    const [ux, uy] = DIRS[di];
+    const k = ux && uy ? Math.SQRT1_2 : 1;
+    const ax = x + ux * k * r, ay = y + uy * k * r;
+    return { x: ax - w / 2 * (1 - ux), y: ay - h / 2 * (1 - uy), w, h };
+  }
+
+  function cost(b, obs) {
+    let c = 0;
+    for (const o of obs) c += overlap(b, o) * (o.wt || 1);
+    const ox = Math.max(0, 4 - b.x) + Math.max(0, b.x + b.w - (W - 4));
+    const oy = Math.max(0, 4 - b.y) + Math.max(0, b.y + b.h - (H - 4));
+    return c + (ox * b.h + oy * b.w) * 4;
+  }
+
+  function labelLines(t, full) {
+    const a = t.dv;
+    const dist = fmtDist(a.distanceArp).replace(' ', '');
+    if (!full) return [t.name.replace(/^UAV-/, ''), `${a.alt}m · ${a.speed} · ${dist}`];
+    const e = etaText(a);
+    return [
+      fullName(t),
+      `${SN[a.status]} · HDG ${pad3(a.heading)}°`,
+      `${a.alt} m · ${a.speed} m/s`,
+      `ARP ${fmtDist(a.distanceArp)} · BRG ${pad3(a.bearingArp)}°`,
+      a.inP ? `Vùng cấm: ${e.txt}` : `Vùng cấm ${fmtDist(a.distToProhibited)} · ETA ${e.txt}`
+    ];
+  }
+
+  // DOM overlays on top of the canvas are obstacles for label placement
+  function domObstacles() {
+    const cr = cv.getBoundingClientRect();
+    return ['.lg', '.hud-wrap', '.cv-tools'].map(s => $(s)).filter(Boolean).map(el => {
+      const r = el.getBoundingClientRect();
+      return { x: r.left - cr.left - 4, y: r.top - cr.top - 4, w: r.width + 8, h: r.height + 8 };
+    });
+  }
+
+  function symbol(st, x, y, size) {
+    const c = colOf(st);
+    g.fillStyle = c;
+    g.strokeStyle = '#fff';
+    g.lineWidth = 1.3;
+    g.beginPath();
+    if (st === 3) {
+      const r = size + 1.5;
+      g.moveTo(x, y - r); g.lineTo(x + r, y); g.lineTo(x, y + r); g.lineTo(x - r, y);
+    } else if (st >= 1) {
+      const r = size + 1;
+      g.moveTo(x, y - r); g.lineTo(x + r * .93, y + r * .62); g.lineTo(x - r * .93, y + r * .62);
+    } else {
+      g.arc(x, y, size, 0, Math.PI * 2);
+    }
+    g.closePath();
+    g.fill();
+    g.stroke();
+  }
+
+  function draw(now) {
     g.setTransform(dpr, 0, 0, dpr, 0, 0);
     const cx = W / 2, cy = H / 2, R = range * 1000 * S;
+    const obs = domObstacles();
 
-    g.fillStyle = mode == 'radar' ? '#020712' : '#0b1a2c';
+    // 1. Background
+    g.fillStyle = '#020712';
     g.fillRect(0, 0, W, H);
+    const bgG = g.createRadialGradient(cx, cy, 0, cx, cy, R);
+    bgG.addColorStop(0, '#061a26');
+    bgG.addColorStop(1, '#020a14');
+    g.fillStyle = bgG;
+    g.beginPath(); g.arc(cx, cy, R, 0, Math.PI * 2); g.fill();
 
-    if (mode == 'radar') {
-      const gr = g.createRadialGradient(cx, cy, 0, cx, cy, R);
-      gr.addColorStop(0, '#04202a');
-      gr.addColorStop(1, '#020a14');
-      g.fillStyle = gr;
-      g.beginPath();
-      g.arc(cx, cy, R, 0, 7);
-      g.fill();
-    } else {
-      g.strokeStyle = 'rgba(80,130,200,.15)';
-      g.lineWidth = 1;
-      const st = range > 20 ? 5000 : range > 10 ? 2000 : 1000;
-      for (let k = -range * 1000; k <= range * 1000; k += st) {
-        g.beginPath(); g.moveTo(sx(k), 0); g.lineTo(sx(k), H);
-        g.moveTo(0, sy(k)); g.lineTo(W, sy(k)); g.stroke();
-      }
-    }
-
-    // Zones
-    poly(ZR, 'rgba(255,176,32,.10)', 'rgba(255,176,32,.85)');
-    poly(ZP, 'rgba(255,77,79,.14)', 'rgba(255,77,79,.95)');
-
-    // North Arrow (BẮC) in top-left
-    const nx = 45, ny = 65;
-    g.strokeStyle = '#fff';
-    g.lineWidth = 2;
-    g.beginPath();
-    g.moveTo(nx, ny + 28);
-    g.lineTo(nx, ny);
-    g.lineTo(nx - 4, ny + 8);
-    g.moveTo(nx, ny);
-    g.lineTo(nx + 4, ny + 8);
-    g.stroke();
-    g.fillStyle = '#fff';
-    g.font = 'bold 11px ui-monospace,Consolas,monospace';
-    g.textAlign = 'center';
-    g.fillText('BẮC', nx, ny - 6);
-    g.textAlign = 'left';
-
+    // 2. Range rings, axes, bearing ticks
     const rs = range > 20 ? [10, 20, 30, 40, 50, 60].filter(v => v <= range) : [range / 4, range / 2, range * 3 / 4, range];
-
-    g.strokeStyle = 'rgba(60,200,150,.45)';
-    g.fillStyle = 'rgba(120,220,180,.8)';
+    g.font = FONT;
+    g.textBaseline = 'alphabetic';
+    g.strokeStyle = `rgba(${C.ring},.35)`;
+    g.fillStyle = C.text;
     g.lineWidth = 1;
     rs.forEach(v => {
       g.setLineDash([4, 5]);
-      g.beginPath(); g.arc(cx, cy, v * 1000 * S, 0, 7); g.stroke();
+      g.beginPath(); g.arc(cx, cy, v * 1000 * S, 0, Math.PI * 2); g.stroke();
       g.setLineDash([]);
-      g.fillText(v + ' km', cx + 4, cy - v * 1000 * S - 3);
+      const txt = v + ' km', tw = g.measureText(txt).width;
+      const tx = cx + 5, ty = cy - v * 1000 * S - 4;
+      g.fillText(txt, tx, ty);
+      obs.push({ x: tx - 2, y: ty - 13, w: tw + 4, h: 16 });
     });
-
     g.beginPath(); g.moveTo(cx - R, cy); g.lineTo(cx + R, cy);
     g.moveTo(cx, cy - R); g.lineTo(cx, cy + R); g.stroke();
+    g.strokeStyle = `rgba(${C.ring},.8)`;
+    g.beginPath(); g.arc(cx, cy, R, 0, Math.PI * 2); g.stroke();
 
-    g.strokeStyle = 'rgba(60,200,150,.9)';
-    g.beginPath(); g.arc(cx, cy, R, 0, 7); g.stroke();
-
-    g.fillStyle = '#9fe8c8';
     g.textAlign = 'center';
     for (let b = 0; b < 360; b += 30) {
-      const an = b * D, r1 = R;
+      const an = b * D;
       g.beginPath();
-      g.moveTo(cx + r1 * Math.sin(an) * .97, cy - r1 * Math.cos(an) * .97);
-      g.lineTo(cx + r1 * Math.sin(an), cy - r1 * Math.cos(an));
+      g.moveTo(cx + R * Math.sin(an) * .97, cy - R * Math.cos(an) * .97);
+      g.lineTo(cx + R * Math.sin(an), cy - R * Math.cos(an));
       g.stroke();
-      g.fillText(String(b).padStart(3, '0'), cx + (R * .93) * Math.sin(an), cy - (R * .93) * Math.cos(an) + 4);
+      const lx = cx + R * .925 * Math.sin(an), ly = cy - R * .925 * Math.cos(an) + 4;
+      g.fillStyle = b === 0 ? '#fff' : C.text;
+      g.font = b === 0 ? FONT_B : FONT;
+      g.fillText(b === 0 ? '000 N' : String(b).padStart(3, '0'), lx, ly);
+      obs.push({ x: lx - 22, y: ly - 13, w: 44, h: 17 });
     }
     g.textAlign = 'left';
+    g.font = FONT;
 
-    if (mode == 'radar' && g.createConicGradient) {
-      const a = sw - Math.PI / 2;
-      const c = g.createConicGradient(a - Math.PI / 3, cx, cy);
-      c.addColorStop(0, 'rgba(25,211,140,0)');
-      c.addColorStop(1 / 6, 'rgba(25,211,140,.3)');
-      c.addColorStop(1 / 6 + .002, 'rgba(25,211,140,0)');
-      c.addColorStop(1, 'rgba(25,211,140,0)');
-      g.fillStyle = c;
-      g.beginPath(); g.arc(cx, cy, R, 0, 7); g.fill();
-      g.strokeStyle = '#19d38c'; g.lineWidth = 2;
+    // 3. Sweep – neutral cyan, max 0.12 opacity, fading behind the beam, under zones and targets
+    if (g.createConicGradient && !reduceMotion) {
+      const a = sw - Math.PI / 2, tail = Math.PI / 2.5;
+      const cg = g.createConicGradient(a - tail, cx, cy);
+      const f = tail / (Math.PI * 2);
+      cg.addColorStop(0, `rgba(${C.sweep},0)`);
+      cg.addColorStop(f, `rgba(${C.sweep},.12)`);
+      cg.addColorStop(f + .001, `rgba(${C.sweep},0)`);
+      cg.addColorStop(1, `rgba(${C.sweep},0)`);
+      g.fillStyle = cg;
+      g.beginPath(); g.arc(cx, cy, R, 0, Math.PI * 2); g.fill();
+      g.strokeStyle = `rgba(${C.sweep},.12)`;
+      g.lineWidth = 1.5;
       g.beginPath(); g.moveTo(cx, cy); g.lineTo(cx + R * Math.cos(a), cy + R * Math.sin(a)); g.stroke();
     }
 
+    // 4. Zones
+    polyPath(PR);
+    g.fillStyle = rgba(C.warn, .08); g.fill();
+    g.strokeStyle = C.warn; g.lineWidth = 1.5; g.setLineDash([7, 5]); g.stroke(); g.setLineDash([]);
+    polyPath(PP);
+    g.fillStyle = rgba(C.danger, .15); g.fill();
+    hatch = hatch || makeHatch();
+    g.fillStyle = hatch; g.fill();
+    g.strokeStyle = C.danger; g.lineWidth = 2; g.stroke();
+
+    const axisAng = Math.atan2(-U.y, U.x); // runway axis on screen
+    const zoneLabel = (txt, a, c, col) => {
+      const p = toXY(a, c);
+      g.save();
+      g.translate(sx(p.x), sy(p.y));
+      g.rotate(axisAng);
+      g.font = '600 11px "Inter", system-ui, sans-serif';
+      g.fillStyle = col;
+      g.textAlign = 'left';
+      g.fillText(txt, 0, 0);
+      const tw = g.measureText(txt).width;
+      g.restore();
+      // Axis-aligned bounds of the rotated text, so target labels avoid it
+      const ca = Math.cos(axisAng), sa = Math.sin(axisAng), ox = sx(p.x), oy = sy(p.y);
+      const pts = [[0, -11], [tw, -11], [tw, 3], [0, 3]].map(([u, v]) => [ox + u * ca - v * sa, oy + u * sa + v * ca]);
+      const xs = pts.map(q => q[0]), ys = pts.map(q => q[1]);
+      obs.push({ x: Math.min(...xs) - 2, y: Math.min(...ys) - 2, w: Math.max(...xs) - Math.min(...xs) + 4, h: Math.max(...ys) - Math.min(...ys) + 4 });
+    };
+    // Only label the restricted band when it is wide enough on screen to hold the text
+    if ((ZP.c0 - ZR.c0) * S >= 18) zoneLabel('VÙNG HẠN CHẾ', ZR.a0 + 1200, ZR.c0 + 1600, rgba(C.warn, .9));
+    zoneLabel('VÙNG CẤM UAV', ZP.a0 + 1200, ZP.c0 + 1600, rgba(C.danger, .95));
+
+    // ARP + runways: obstacle now, drawn last so nothing covers it
+    const rwPts = RW.map(r => [sx(r.p[0]), sy(r.p[1])]);
+    const xs = rwPts.map(p => p[0]).concat(cx), ys = rwPts.map(p => p[1]).concat(cy);
+    const arpBox = { x: Math.min(...xs) - 10, y: Math.min(...ys) - 10, w: Math.max(...xs) - Math.min(...xs) + 20, h: Math.max(...ys) - Math.min(...ys) + 34, wt: 50 }; // never cover the airport
+    obs.push(arpBox);
+
+    const vis = shown();
+    const blinkOn = reduceMotion || now % 1000 < 600;
+
+    // 5. History trails (last TRAIL_SEC of flight, fading with age)
+    vis.forEach(t => {
+      g.fillStyle = colOf(t.dv.status);
+      t.tr.forEach(p => {
+        const age = simT - p[2];
+        g.globalAlpha = Math.max(0, 1 - age / TRAIL_SEC) * .7;
+        g.fillRect(sx(p[0]) - 1.25, sy(p[1]) - 1.25, 2.5, 2.5);
+      });
+    });
+    g.globalAlpha = 1;
+
+    // 6. Prediction vectors: distance flown in VECTOR_SEC, dashed 1px; plus a short heading stick
+    vis.forEach(t => {
+      const x = sx(t.x), y = sy(t.y), hx = Math.sin(t.h * D), hy = Math.cos(t.h * D), L = t.s * VECTOR_SEC;
+      g.strokeStyle = colOf(t.dv.status);
+      g.lineWidth = 1;
+      g.setLineDash([4, 3]);
+      g.beginPath(); g.moveTo(x, y); g.lineTo(sx(t.x + hx * L), sy(t.y + hy * L)); g.stroke();
+      g.setLineDash([]);
+      g.lineWidth = 2;
+      g.beginPath(); g.moveTo(x + hx * 8, y - hy * 8); g.lineTo(x + hx * 18, y - hy * 18); g.stroke();
+    });
+
+    // 7. Targets
+    vis.forEach(t => {
+      const x = sx(t.x), y = sy(t.y), st = t.dv.status;
+      if (t.id === selId) {
+        const p = reduceMotion ? 0 : (now / 1200) % 1;
+        g.strokeStyle = C.select; g.lineWidth = 2;
+        g.beginPath(); g.arc(x, y, 13, 0, Math.PI * 2); g.stroke();
+        g.globalAlpha = 1 - p;
+        g.beginPath(); g.arc(x, y, 13 + p * 14, 0, Math.PI * 2); g.stroke();
+        g.globalAlpha = 1;
+      } else if (t.id === hoverId) {
+        g.strokeStyle = rgba(C.select, .6); g.lineWidth = 1.5;
+        g.beginPath(); g.arc(x, y, 12, 0, Math.PI * 2); g.stroke();
+      }
+      g.globalAlpha = st === 3 && !blinkOn ? .25 : 1;
+      symbol(st, x, y, 6);
+      g.globalAlpha = 1;
+      obs.push({ x: x - 9, y: y - 9, w: 18, h: 18 });
+    });
+
+    // 8–9. Labels with leader lines
+    const placed = [];
+    const order = vis.slice().sort((a, b) => (b.id === selId) - (a.id === selId) || (b.id === hoverId) - (a.id === hoverId) || threat(a, b));
+    order.forEach(t => {
+      const full = t.id === selId || t.id === hoverId;
+      if (!full && !showLabels) { t._box = null; return; }
+      const x = sx(t.x), y = sy(t.y);
+      const lines = labelLines(t, full);
+      g.font = FONT_B;
+      let w = g.measureText(lines[0]).width;
+      g.font = FONT;
+      for (let k = 1; k < lines.length; k++) w = Math.max(w, g.measureText(lines[k]).width);
+      w = Math.ceil(w) + PADX * 2;
+      const h = lines.length * LH + PADY * 2;
+      const others = placed.concat(obs);
+
+      let box;
+      const off = lblOff[t.id];
+      if (off) {
+        box = { x: x + off.dx, y: y + off.dy, w, h };
+      } else {
+        const prev = t._lp && t._lp.full === full ? boxAt(x, y, w, h, t._lp.di, t._lp.r) : null;
+        if (prev && cost(prev, others) === 0) {
+          box = prev;
+        } else {
+          let best = null, bestC = Infinity, bestP = null;
+          search:
+          for (const r of DISTS) {
+            for (let di = 0; di < 8; di++) {
+              const b = boxAt(x, y, w, h, di, r);
+              const c = cost(b, others);
+              if (c < bestC) { bestC = c; best = b; bestP = { di, r }; }
+              if (c === 0) break search;
+            }
+          }
+          box = best;
+          t._lp = { ...bestP, full };
+        }
+      }
+      placed.push(box);
+      t._box = box;
+
+      // Leader line from the symbol edge to the nearest point of the label
+      const px = Math.max(box.x, Math.min(x, box.x + box.w)), py = Math.max(box.y, Math.min(y, box.y + box.h));
+      const dl = Math.hypot(px - x, py - y);
+      if (dl > 10) {
+        g.strokeStyle = 'rgba(200,215,235,.55)';
+        g.lineWidth = 1;
+        g.beginPath(); g.moveTo(x + (px - x) / dl * 9, y + (py - y) / dl * 9); g.lineTo(px, py); g.stroke();
+      }
+
+      const c = colOf(t.dv.status);
+      g.fillStyle = C.labelBg;
+      g.fillRect(box.x, box.y, box.w, box.h);
+      g.strokeStyle = t.id === selId ? C.select : rgba(c, .85);
+      g.lineWidth = t.id === selId ? 1.5 : 1;
+      g.strokeRect(box.x + .5, box.y + .5, box.w - 1, box.h - 1);
+      g.textBaseline = 'top';
+      lines.forEach((s, k) => {
+        g.font = k === 0 ? FONT_B : FONT;
+        g.fillStyle = k === 0 ? c : C.text;
+        g.fillText(s, box.x + PADX, box.y + PADY + k * LH + 2);
+      });
+      g.textBaseline = 'alphabetic';
+    });
+
+    // 10. ARP & runways on top
     g.lineWidth = 4;
     g.strokeStyle = '#dbe6f7';
     [[0, 1], [2, 3]].forEach(([i, j]) => {
-      g.beginPath(); g.moveTo(sx(RW[i].p[0]), sy(RW[i].p[1])); g.lineTo(sx(RW[j].p[0]), sy(RW[j].p[1])); g.stroke();
+      g.beginPath(); g.moveTo(rwPts[i][0], rwPts[i][1]); g.lineTo(rwPts[j][0], rwPts[j][1]); g.stroke();
     });
-
-    g.fillStyle = '#cfe0ff';
-    g.font = '10px ui-monospace,monospace';
-    RW.forEach(r => g.fillText(r.n, sx(r.p[0]) + 5, sy(r.p[1]) - 5));
-
-    g.fillStyle = '#2f80ff';
-    g.beginPath(); g.arc(cx, cy, 4, 0, 7); g.fill();
-    g.fillStyle = '#fff'; g.font = 'bold 11px system-ui'; g.fillText('TSN', cx + 8, cy + 14);
-
-    const now = performance.now();
-    const placedBoxes = [];
-
-    // Chỉ hiển thị các mục tiêu nằm trong tầm phủ của Radar
-    const visibleTargets = T.filter(t => t.inRadar);
-
-    visibleTargets.forEach(t => {
-      const c = SC[t.st] || '#19d38c', x = sx(t.x), y = sy(t.y), a = t.an || {};
-      g.fillStyle = c;
-      t.tr.forEach((p, k) => {
-        g.globalAlpha = k / t.tr.length * .6;
-        g.fillRect(sx(p[0]) - 1, sy(p[1]) - 1, 2.5, 2.5);
-      });
-      g.globalAlpha = 1;
-
-      // Projected trajectory line: green for safe parallel, warning color if entering/approaching
-      const L = Math.min(a.eP ?? 600, 600) * t.s, hx = Math.sin(t.h * D), hy = Math.cos(t.h * D);
-      g.strokeStyle = c; g.globalAlpha = .8; g.setLineDash([4, 4]); g.lineWidth = 1.5;
-      g.beginPath(); g.moveTo(x, y); g.lineTo(sx(t.x + hx * L), sy(t.y + hy * L)); g.stroke();
-      g.setLineDash([]); g.globalAlpha = 1;
-
-      // Heading vector tick
-      g.lineWidth = 2.5; g.beginPath(); g.moveTo(x, y); g.lineTo(x - hx * 26, y + hy * 26); g.stroke();
-
-      if (t.st >= 2) {
-        const p = (now / 700) % 1;
-        g.globalAlpha = 1 - p; g.lineWidth = 2;
-        g.beginPath(); g.arc(x, y, 8 + p * 22, 0, 7); g.stroke(); g.globalAlpha = 1;
-      }
-
-      g.fillStyle = c; g.beginPath(); g.arc(x, y, 6, 0, 7); g.fill();
-      g.strokeStyle = '#fff'; g.lineWidth = 1.5; g.stroke();
-
-      const isParallelSafe = t.isParallel && t.scenario && t.scenario.phase === 'parallel';
-      const ln = [
-        t.dispName,
-        `Hướng bay: ${Math.round(t.h)}°`,
-        `${fm(a.d)} (ARP) · ${t.alt} m · ${t.s} m/s`,
-        isParallelSafe
-          ? `Song song ZR (cách 3.00 km) · AN TOÀN`
-          : (a.eP === 0 ? 'ĐÃ XÂM NHẬP VÙNG CẤM' : (a.eP == null ? 'Vùng cấm: ' + fm(a.dP) : 'Vùng cấm: ' + fm(a.dP) + ' · ETA ' + a.eP + 's'))
-      ];
-      g.font = '11px ui-monospace,Consolas,monospace';
-      const bw = Math.max(...ln.map(s => g.measureText(s).width)) + 16;
-      const bh = 64;
-
-      // Candidate positions for label tag to avoid overlap with other boxes
-      const candidates = [
-        { bx: x + 14, by: y - 18 },             // Top-Right
-        { bx: x + 14, by: y + 10 },             // Bottom-Right
-        { bx: x - bw - 14, by: y - 18 },        // Top-Left
-        { bx: x - bw - 14, by: y + 10 },        // Bottom-Left
-        { bx: x - bw / 2, by: y - bh - 16 },    // Top-Center
-        { bx: x - bw / 2, by: y + 20 },         // Bottom-Center
-        { bx: x + 14, by: y - bh - 24 },        // Far Top-Right
-        { bx: x - bw - 14, by: y - bh - 24 },   // Far Top-Left
-        { bx: x + 14, by: y + bh + 14 },        // Far Bottom-Right
-        { bx: x - bw - 14, by: y + bh + 14 }    // Far Bottom-Left
-      ];
-
-      let best = candidates[0];
-      let minOverlap = Infinity;
-
-      for (const cand of candidates) {
-        const cx_box = Math.max(8, Math.min(W - bw - 8, cand.bx));
-        const cy_box = Math.max(8, Math.min(H - bh - 8, cand.by));
-
-        let overlap = 0;
-        for (const pb of placedBoxes) {
-          const ox = Math.max(0, Math.min(cx_box + bw, pb.x + pb.w) - Math.max(cx_box, pb.x));
-          const oy = Math.max(0, Math.min(cy_box + bh, pb.y + pb.h) - Math.max(cy_box, pb.y));
-          overlap += ox * oy;
-        }
-
-        // Avoid obscuring the UAV symbol itself
-        if (cx_box <= x + 8 && cx_box + bw >= x - 8 && cy_box <= y + 8 && cy_box + bh >= y - 8) {
-          overlap += 4000;
-        }
-
-        if (overlap < minOverlap) {
-          minOverlap = overlap;
-          best = { bx: cx_box, by: cy_box };
-          if (overlap === 0) break;
-        }
-      }
-
-      placedBoxes.push({ x: best.bx, y: best.by, w: bw, h: bh });
-
-      // Leader pointer line from target dot to label box
-      const leaderX = best.bx > x ? best.bx : best.bx + bw;
-      const leaderY = best.by + bh / 2;
-      g.strokeStyle = 'rgba(180,220,255,.35)';
-      g.lineWidth = 1;
-      g.setLineDash([2, 2]);
-      g.beginPath();
-      g.moveTo(x, y);
-      g.lineTo(leaderX, leaderY);
-      g.stroke();
-      g.setLineDash([]);
-
-      g.fillStyle = 'rgba(5,12,28,.90)';
-      g.fillRect(best.bx, best.by, bw, bh);
-      g.strokeStyle = c;
-      g.lineWidth = 1;
-      g.strokeRect(best.bx, best.by, bw, bh);
-
-      g.fillStyle = c;
-      g.fillText(ln[0], best.bx + 8, best.by + 14);
-      g.fillStyle = '#64b5f6';
-      g.fillText(ln[1], best.bx + 8, best.by + 27);
-      g.fillStyle = '#dbe6f7';
-      g.fillText(ln[2], best.bx + 8, best.by + 40);
-      g.fillText(ln[3], best.bx + 8, best.by + 53);
-    });
+    g.fillStyle = '#3b82f6';
+    g.strokeStyle = '#fff';
+    g.lineWidth = 1.5;
+    g.beginPath(); g.arc(cx, cy, 4.5, 0, Math.PI * 2); g.fill(); g.stroke();
+    g.font = '700 12px "Inter", system-ui, sans-serif';
+    g.textAlign = 'center';
+    const vw = g.measureText('VVTS').width + 10;
+    g.fillStyle = 'rgba(6,12,24,.85)';
+    g.fillRect(cx - vw / 2, cy + 9, vw, 17);
+    g.fillStyle = '#fff';
+    g.fillText('VVTS', cx, cy + 22);
+    g.textAlign = 'left';
   }
 
   function loop(n) {
-    const dt = Math.min((n - last) / 1000, .2); last = n; sw = (sw + dt * 1.1) % (Math.PI * 2);
+    const realDt = (n - last) / 1000;
+    const dt = Math.min(realDt, .2); last = n; sw = (sw + dt * 1.1) % (Math.PI * 2);
+    frames++; fpsAcc += realDt;
+    if (fpsAcc >= 1) { $('#fps').textContent = Math.round(frames / fpsAcc); frames = 0; fpsAcc = 0; }
+
     if (run) {
       const k = dt * mult;
+      simT += k;
       T.forEach(t => {
         t.x += t.s * Math.sin(t.h * D) * k;
         t.y += t.s * Math.cos(t.h * D) * k;
         const q = t.tr[t.tr.length - 1];
-        if (!q || Math.hypot(t.x - q[0], t.y - q[1]) > 400) {
-          t.tr.push([t.x, t.y]);
-          if (t.tr.length > 50) t.tr.shift();
-        }
+        if (!q || simT - q[2] >= 2) t.tr.push([t.x, t.y, simT]);
+        while (t.tr.length && simT - t.tr[0][2] > TRAIL_SEC) t.tr.shift();
       });
 
       // Update scenario UAVs (maneuvers, speed changes)
@@ -795,13 +911,10 @@ export function initEngine() {
             if (t.s < t.maxSpeed) {
               const accelFactor = mult > 20 ? 3 : 1;
               const newSpeed = Math.min(t.maxSpeed, t.s + sc.accelRate * dt * accelFactor);
-              if (Math.abs(newSpeed - t.s) > 0.05) {
-                t.s = Math.round(newSpeed * 10) / 10;
-                dirty = true;
-              }
+              if (Math.abs(newSpeed - t.s) > 0.05) t.s = Math.round(newSpeed * 10) / 10;
               if (t.s >= t.maxSpeed && !sc.maxSpeedLogged) {
                 sc.maxSpeedLogged = true;
-                log('w', `⚡ [Kịch bản] ${t.dispName} (${t.id}) tăng tốc đạt giới hạn vận tốc: ${t.s} m/s`);
+                log('w', `⚡ [Kịch bản] ${t.name} (${t.id}) tăng tốc đạt giới hạn vận tốc: ${t.s} m/s`);
               }
             }
           }
@@ -830,17 +943,17 @@ export function initEngine() {
     const nl = T.length;
     // Nếu mục tiêu ra khỏi tầm phủ Radar thì biến mất
     T = T.filter(t => {
-      const inRadar = radars.some(r => Math.hypot(t.x - r.x, t.y - r.y) <= r.r);
-      if (!inRadar) {
-        log('i', `📡 ${t.dispName || t.name} (${t.id}) ra khỏi tầm phủ Radar – mục tiêu biến mất`);
+      if (!inRadarCover(t.x, t.y)) {
+        log('i', `📡 ${t.name} (${t.id}) ra khỏi tầm phủ Radar – mục tiêu biến mất`);
+        if (selId === t.id) selId = null;
         return false;
       }
       return true;
     });
 
-    T.forEach(an); acc += dt;
-    if (acc > .25 || dirty || nl != T.length) { acc = 0; dirty = false; render(); }
-    draw();
+    acc += dt;
+    if (acc >= TICK || dirty || nl != T.length) { acc = 0; dirty = false; tick(); }
+    draw(n);
     window.__rafId = requestAnimationFrame(loop);
   }
 
@@ -862,37 +975,88 @@ export function initEngine() {
     log('i', `↔ Đã phân tách ${n} mục tiêu UAV`);
   }
 
-  function pos(e) {
-    const r = cv.getBoundingClientRect(), x = (e.clientX - r.left - W / 2) / S, y = -(e.clientY - r.top - H / 2) / S;
-    return { x, y, b: (Math.atan2(x, y) / D + 360) % 360, d: Math.hypot(x, y) };
+  // ---------------------------------------------------------------------------
+  // Selection: radar ↔ card
+  // ---------------------------------------------------------------------------
+  function select(id, fromRadar) {
+    selId = fromRadar ? id : (selId === id ? null : id);
+    if (fromRadar) flashAt = performance.now();
+    render();
+    if (selId && fromRadar) {
+      const card = document.querySelector(`.card[data-card-id="${selId}"]`);
+      if (card) {
+        card.scrollIntoView({ behavior: reduceMotion ? 'auto' : 'smooth', block: 'nearest' });
+      }
+    }
   }
 
+  function pos(e) {
+    const r = cv.getBoundingClientRect(), mx = e.clientX - r.left, my = e.clientY - r.top;
+    const x = (mx - W / 2) / S, y = -(my - H / 2) / S;
+    return { mx, my, x, y, b: bearing(x, y), d: Math.hypot(x, y) };
+  }
+
+  function hit(mx, my) {
+    const vis = shown();
+    for (let k = vis.length - 1; k >= 0; k--) {
+      const b = vis[k]._box;
+      if (b && mx >= b.x && mx <= b.x + b.w && my >= b.y && my <= b.y + b.h) return { t: vis[k], label: true };
+    }
+    let best = null, bd = 14;
+    vis.forEach(t => {
+      const d = Math.hypot(sx(t.x) - mx, sy(t.y) - my);
+      if (d <= bd) { bd = d; best = t; }
+    });
+    return best ? { t: best, label: false } : null;
+  }
+
+  cv.onmousedown = e => {
+    const p = pos(e), h = hit(p.mx, p.my);
+    dragMoved = false;
+    if (h && h.label) drag = { id: h.t.id, gx: p.mx - h.t._box.x, gy: p.my - h.t._box.y, x0: p.mx, y0: p.my };
+  };
   cv.onmousemove = e => {
     const p = pos(e);
+    if (drag) {
+      const t = T.find(x => x.id === drag.id);
+      if (t && (dragMoved || Math.hypot(p.mx - drag.x0, p.my - drag.y0) > 3)) {
+        dragMoved = true;
+        lblOff[t.id] = { dx: p.mx - drag.gx - sx(t.x), dy: p.my - drag.gy - sy(t.y) };
+      }
+      cv.style.cursor = 'grabbing';
+      return;
+    }
+    const h = hit(p.mx, p.my);
+    hoverId = h ? h.t.id : null;
+    cv.style.cursor = h ? (h.label ? 'grab' : 'pointer') : 'crosshair';
     $('#hud').textContent = `${(ARP.la + p.y / KY).toFixed(5)}°N  ${(ARP.lo + p.x / KX).toFixed(5)}°E · BRG ${p.b.toFixed(0)}° · ${(p.d / 1000).toFixed(1)} km`;
   };
+  cv.onmouseleave = () => { hoverId = null; };
+  window.addEventListener('mouseup', () => { drag = null; }, { signal });
+  cv.ondblclick = e => {
+    const p = pos(e), h = hit(p.mx, p.my);
+    if (h && h.label) { delete lblOff[h.t.id]; h.t._lp = null; }
+  };
   cv.onclick = e => {
+    if (dragMoved) { dragMoved = false; return; }
     const p = pos(e);
-    const r = cv.getBoundingClientRect();
-    const mouseScreenX = e.clientX - r.left;
-    const mouseScreenY = e.clientY - r.top;
-    const clickedTarget = T.find(t => Math.hypot(sx(t.x) - mouseScreenX, sy(t.y) - mouseScreenY) <= 18);
-    if (clickedTarget) {
-      $('#hud').textContent = `Đã chọn ${clickedTarget.dispName} (${clickedTarget.id}) · Hướng: ${Math.round(clickedTarget.h)}° · Cao: ${clickedTarget.alt} m · V: ${clickedTarget.s} m/s – dùng nút ± dưới thẻ để chỉnh`;
-      const card = document.querySelector(`.card[data-card-id="${clickedTarget.id}"]`);
-      if (card) {
-        card.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-        card.style.outline = '2px solid var(--ac)';
-        setTimeout(() => card.style.outline = '', 2000);
-      }
+    const h = hit(p.mx, p.my);
+    if (h) {
+      const t = h.t, a = t.dv;
+      $('#hud').textContent = `Đã chọn ${t.name} (${t.id}) · Hướng: ${pad3(a.heading)}° · Cao: ${a.alt} m · V: ${a.speed} m/s – dùng nút ± trong thẻ để chỉnh`;
+      select(t.id, true);
       return;
     }
     $('#fB').value = Math.round(p.b);
     $('#fD').value = (p.d / 1000).toFixed(1);
     $('#fH').value = Math.round((p.b + 180) % 360);
+    $('#addForm').open = true;
     $('#hud').textContent = 'Đã chọn vị trí xuất hiện – bấm “+ Thêm UAV”';
   };
 
+  // ---------------------------------------------------------------------------
+  // Controls
+  // ---------------------------------------------------------------------------
   const gv = id => {
     const el = $(id);
     return el ? +el.value : 0;
@@ -928,16 +1092,9 @@ export function initEngine() {
     $('#fN').value = '';
   };
 
-  const bAddParallel = $('#bAddParallel');
-  if (bAddParallel) bAddParallel.onclick = handleAddParallel;
-  const bAddParallelForm = $('#bAddParallelForm');
-  if (bAddParallelForm) bAddParallelForm.onclick = handleAddParallel;
-
   window.handleAddParallel = handleAddParallel;
   window.separateTargets = separateTargets;
 
-  const bAim = $('#bAim');
-  if (bAim) bAim.onclick = () => $('#fH').value = (gv('#fB') + 180) % 360;
   $('#bRnd').onclick = () => {
     const b = Math.round(Math.random() * 359);
     mk({
@@ -949,94 +1106,119 @@ export function initEngine() {
       a: 50 + Math.round(Math.random() * 400)
     });
   };
-  $('#bClr').onclick = () => { T = []; dirty = true; };
+  $('#bClr').onclick = () => { T = []; selId = null; dirty = true; };
   $('#bReset').onclick = () => { seed(); dirty = true; };
-  const bSep = $('#bSep');
-  if (bSep) bSep.onclick = separateTargets;
   $('#bPlay').onclick = e => {
     run = !run;
     const b = e.currentTarget;
     b.classList.toggle('paused', !run);
+    b.setAttribute('aria-pressed', String(!run));
     b.querySelector('.lbl').textContent = run ? 'Tạm dừng' : 'Tiếp tục';
   };
   $('#sMult').onchange = e => mult = +e.target.value;
   $('#sRange').onchange = e => { range = +e.target.value; size(); };
-  const vRadar = $('#vRadar');
-  if (vRadar) vRadar.onclick = () => { mode = 'radar'; vRadar.className = 'on'; const vm = $('#vMap'); if (vm) vm.className = ''; };
-  const vMap = $('#vMap');
-  if (vMap) vMap.onclick = () => { mode = 'map'; vMap.className = 'on'; const vr = $('#vRadar'); if (vr) vr.className = ''; };
-  $('#bSnd').onclick = e => { snd = !snd; e.currentTarget.classList.toggle('on', snd); };
+  $('#bSnd').onclick = e => {
+    snd = !snd;
+    const b = e.currentTarget;
+    b.classList.toggle('on', snd);
+    b.setAttribute('aria-pressed', String(snd));
+    b.querySelector('.lbl').textContent = 'Âm báo: ' + (snd ? 'Bật' : 'Tắt');
+  };
+  $('#bLbl').onclick = e => {
+    showLabels = !showLabels;
+    const b = e.currentTarget;
+    b.classList.toggle('on', showLabels);
+    b.setAttribute('aria-pressed', String(showLabels));
+    b.querySelector('.lbl').textContent = 'Nhãn: ' + (showLabels ? 'Bật' : 'Tắt');
+  };
+  document.querySelectorAll('[data-filter]').forEach(b => {
+    b.onclick = () => {
+      const k = b.dataset.filter;
+      filt[k] = !filt[k];
+      b.classList.toggle('off', !filt[k]);
+      b.setAttribute('aria-pressed', String(filt[k]));
+      render();
+    };
+  });
+  const tw = $('#tWarn');
+  if (tw) tw.textContent = WARN_T;
 
   const listEl = $('#list');
-  if (listEl) {
-    listEl.onpointerdown = e => { if (e.target.closest('button')) listHold = true; };
-    const release = () => { if (listHold) { listHold = false; dirty = true; } };
-    window.addEventListener('pointerup', () => setTimeout(release, 0));
-    window.addEventListener('pointercancel', release);
-    listEl.onclick = e => {
-      const btn = e.target.closest('button');
-      if (!btn) return;
-      const ds = btn.dataset;
-      const d = ds.del;
-      if (d) { T = T.filter(t => t.id != d); dirty = true; return; }
+  listEl.onpointerdown = e => { if (e.target.closest('button')) listHold = true; };
+  const release = () => { if (listHold) { listHold = false; dirty = true; } };
+  window.addEventListener('pointerup', () => setTimeout(release, 0), { signal });
+  window.addEventListener('pointercancel', release, { signal });
+  listEl.onkeydown = e => {
+    const row = e.target.closest('[data-sel]');
+    if (row && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); select(row.dataset.sel, false); }
+  };
+  listEl.onclick = e => {
+    const btn = e.target.closest('button');
+    if (!btn) {
+      const row = e.target.closest('[data-sel]');
+      if (row) select(row.dataset.sel, false);
+      return;
+    }
+    const ds = btn.dataset;
+    const d = ds.del;
+    if (d) { T = T.filter(t => t.id != d); if (selId === d) selId = null; dirty = true; return; }
 
-      const triggerSc = ds.triggerSc;
-      if (triggerSc) {
-        const t = T.find(x => x.id === triggerSc);
-        if (t && t.scenario) {
-          triggerManeuver(t);
-        }
-        return;
+    const triggerSc = ds.triggerSc;
+    if (triggerSc) {
+      const t = T.find(x => x.id === triggerSc);
+      if (t && t.scenario) {
+        triggerManeuver(t);
       }
+      return;
+    }
 
-      const resetSc = ds.resetSc;
-      if (resetSc) {
-        const t = T.find(x => x.id === resetSc);
-        if (t && t.scenario) {
-          resetParallelUAV(t);
-        }
-        return;
+    const resetSc = ds.resetSc;
+    if (resetSc) {
+      const t = T.find(x => x.id === resetSc);
+      if (t && t.scenario) {
+        resetParallelUAV(t);
       }
+      return;
+    }
 
-      const adjAlt = ds.adjAlt;
-      const targetId = ds.id;
-      if (adjAlt && targetId) {
-        const t = T.find(x => x.id === targetId);
-        if (t) {
-          const oldAlt = t.alt;
-          t.alt = Math.max(10, Math.min(4000, Math.round(t.alt + (+adjAlt))));
-          dirty = true;
-          log('i', `Điều chỉnh độ cao ${t.dispName} (${t.id}): ${oldAlt} m → ${t.alt} m (${+adjAlt > 0 ? '+' : ''}${adjAlt} m)`);
-          render();
-        }
-        return;
+    const adjAlt = ds.adjAlt;
+    const targetId = ds.id;
+    if (adjAlt && targetId) {
+      const t = T.find(x => x.id === targetId);
+      if (t) {
+        const oldAlt = t.alt;
+        t.alt = Math.max(10, Math.min(4000, Math.round(t.alt + (+adjAlt))));
+        log('i', `Điều chỉnh độ cao ${t.name} (${t.id}): ${oldAlt} m → ${t.alt} m (${+adjAlt > 0 ? '+' : ''}${adjAlt} m)`);
+        tick();
       }
+      return;
+    }
 
-      const adjSpd = ds.adjSpd;
-      if (adjSpd && targetId) {
-        const t = T.find(x => x.id === targetId);
-        if (t) {
-          const oldSpd = t.s;
-          const maxAllowed = t.maxSpeed || 80;
-          const newSpd = Math.max(2, Math.min(maxAllowed, Math.round((t.s + (+adjSpd)) * 10) / 10));
-          if (newSpd === t.s && +adjSpd > 0) {
-            log('w', `Mục tiêu ${t.dispName} (${t.id}) đã ở vận tốc tối đa (${t.s} m/s)`);
-          } else {
-            t.s = newSpd;
-            dirty = true;
-            log('i', `Điều chỉnh vận tốc ${t.dispName} (${t.id}): ${oldSpd} m/s → ${t.s} m/s`);
-            render();
-          }
+    const adjSpd = ds.adjSpd;
+    if (adjSpd && targetId) {
+      const t = T.find(x => x.id === targetId);
+      if (t) {
+        const oldSpd = t.s;
+        const maxAllowed = t.maxSpeed || 80;
+        const newSpd = Math.max(2, Math.min(maxAllowed, Math.round((t.s + (+adjSpd)) * 10) / 10));
+        if (newSpd === t.s && +adjSpd > 0) {
+          log('w', `Mục tiêu ${t.name} (${t.id}) đã ở vận tốc tối đa (${t.s} m/s)`);
+        } else {
+          t.s = newSpd;
+          log('i', `Điều chỉnh vận tốc ${t.name} (${t.id}): ${oldSpd} m/s → ${t.s} m/s`);
+          tick();
         }
-        return;
       }
-    };
-  }
+      return;
+    }
+  };
 
   document.querySelectorAll('.tabs button').forEach(b => {
     b.onclick = () => {
       document.querySelectorAll('.tabs button,.pane').forEach(x => x.classList.remove('on'));
+      document.querySelectorAll('.tabs button').forEach(x => x.setAttribute('aria-selected', 'false'));
       b.classList.add('on');
+      b.setAttribute('aria-selected', 'true');
       const target = $('#' + b.dataset.p);
       if (target) target.classList.add('on');
     };
@@ -1050,8 +1232,12 @@ export function initEngine() {
     if (ictEl) ictEl.textContent = new Date(n + 7 * 36e5).toISOString().substr(11, 8);
   }, 1000);
 
-  window.addEventListener('resize', size);
+  window.addEventListener('resize', size, { signal });
+  const ro = new ResizeObserver(size);
+  ro.observe(cv);
+  signal.addEventListener('abort', () => ro.disconnect());
   seed();
   size();
+  tick();
   window.__rafId = requestAnimationFrame(loop);
 }
