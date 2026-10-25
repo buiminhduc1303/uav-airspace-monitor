@@ -1,7 +1,7 @@
-import { bearing, pointInPolygon, distToPolygon, rayEta, classify, fmtDist, fmtClock } from './geometry.js';
+import { bearing, fmtDist, fmtClock } from './geometry.js';
 
-// Early-warning horizon: a track whose current vector reaches a zone within WARN_T seconds is "warning"
-export const WARN_T = 300;
+// Early-warning horizon: a track that reaches a zone within WARN_T seconds is "warning"
+export const WARN_T = 180;
 const TICK = 0.25;      // real seconds between data ticks (derived values, cards, labels)
 const TRAIL_SEC = 60;   // history trail length, simulated seconds
 const VECTOR_SEC = 60;  // prediction vector length, simulated seconds
@@ -82,9 +82,8 @@ export function initEngine() {
   ];
 
   const SN = ['AN TOÀN', 'CẢNH BÁO', 'VÙNG HẠN CHẾ', 'VÙNG CẤM'];
-  const IDN = { unknown: 'chưa nhận dạng', probable: 'dự đoán', confirmed: '' };
 
-  // Zones as polygons in the ENU frame (rotated rectangles along the 069° runway axis)
+  // Zone outlines in the ENU frame (rotated rectangles along the 069° runway axis)
   const corners = z => [[z.a0, z.c0], [z.a1, z.c0], [z.a1, z.c1], [z.a0, z.c1]].map(([a, c]) => { const p = toXY(a, c); return [p.x, p.y]; });
   const PP = corners(ZP), PR = corners(ZR);
 
@@ -107,10 +106,9 @@ export function initEngine() {
   const cat = st => st === 3 ? 'd' : st >= 1 ? 'w' : 's';
   const colOf = st => st === 3 ? C.danger : st >= 1 ? C.warn : C.safe;
   const pad3 = v => String(Math.round(v) % 360).padStart(3, '0');
-  const fullName = t => t.identity && t.identity !== 'confirmed' ? `${t.name} · ${IDN[t.identity]}` : t.name;
   const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
 
-  let listHold = false, T = [], seq = 0, run = true, mult = 20, range = 40, snd = true, logs = [], last = performance.now(), sw = 0, dirty = true, ac, acc = 0, simT = 0;
+  let listHold = false, listHover = false, listOrder = [], T = [], seq = 0, run = true, mult = 20, range = 40, snd = true, logs = [], last = performance.now(), sw = 0, dirty = true, ac, acc = 0, simT = 0;
   let selId = null, flashAt = 0, hoverId = null, showLabels = true, drag = null, dragMoved = false;
   let frames = 0, fpsAcc = 0;
   const filt = { s: true, w: true, d: true };
@@ -169,11 +167,10 @@ export function initEngine() {
     const maxSpeed = o.maxSpeed || Math.max(initialSpeed, 25);
     const isParallel = !!o.isParallel;
 
-    // id and name are fixed for the whole life of the track; identity is tracked separately
     const t = {
       id,
       name: actualName,
-      identity: null,
+      dispName: 'UNKNOWN',
       sensorLevel: 'none',
       sensorLabel: 'NGOÀI TẦM',
       x,
@@ -186,6 +183,7 @@ export function initEngine() {
       tr: [],
       st: -1,
       w: false,
+      wR: false,
       inPAt: null,
       inRadar: true,
       dv: null,
@@ -274,7 +272,7 @@ export function initEngine() {
     sc.elapsed = sc.delay;
     sc.accelStartTime = sc.delay + 3;
     sc.maxSpeedLogged = false;
-    log('w', `🔄 [Kịch bản] ${t.name} (${t.id}) đổi hướng bay (${Math.round(oldH)}° → ${Math.round(t.h)}°) và giảm vận tốc 4.5 m/s (${oldS} m/s → ${t.s} m/s)`);
+    log('w', `🔄 [Kịch bản] ${t.dispName} (${t.id}) đổi hướng bay (${Math.round(oldH)}° → ${Math.round(t.h)}°) và giảm vận tốc 4.5 m/s (${oldS} m/s → ${t.s} m/s)`);
     tick();
   }
 
@@ -293,7 +291,7 @@ export function initEngine() {
     sc.phase = 'parallel';
     sc.elapsed = 0;
     sc.maxSpeedLogged = false;
-    log('i', `↺ [Kịch bản] ${t.name} (${t.id}) đặt lại bay song song cách vùng hạn chế 3.00 km (${t.s} m/s, hướng 069°)`);
+    log('i', `↺ [Kịch bản] ${t.dispName} (${t.id}) đặt lại bay song song cách vùng hạn chế 3.00 km (${t.s} m/s, hướng 069°)`);
     tick();
   }
 
@@ -317,38 +315,83 @@ export function initEngine() {
     mk({ n: 'SPARROW', b: 210, d: 25, h: 45, s: 15, maxSpeed: 20, a: 30 });
   }
 
-  // Single source of truth: every tick computes t.dv once; radar labels and cards only read it
+  // Zone distance / ETA on the runway-aligned rectangles (data logic of the earlier version)
+  const dz = (z, x, y) => {
+    const a = x * U.x + y * U.y, c = x * V.x + y * V.y;
+    return Math.hypot(Math.max(z.a0 - a, 0, a - z.a1), Math.max(z.c0 - c, 0, c - z.c1));
+  };
+
+  const eta = (z, t) => {
+    if (dz(z, t.x, t.y) == 0) return 0;
+    const vx = t.s * Math.sin(t.h * D), vy = t.s * Math.cos(t.h * D);
+    for (let s = 2; s <= 3600; s += 2) {
+      if (dz(z, t.x + vx * s, t.y + vy * s) == 0) return s;
+    }
+    return null;
+  };
+
+  // Every tick computes t.dv once; radar labels and cards only read it
   function derive(t) {
     const inRF = rfStations.some(s => Math.hypot(t.x - s.x, t.y - s.y) <= s.r);
     const inCamera = cameras.some(c => Math.hypot(t.x - c.x, t.y - c.y) <= c.r);
     t.inRadar = inRadarCover(t.x, t.y);
 
-    const identity = inCamera ? 'confirmed' : inRF ? 'probable' : 'unknown';
-    t.sensorLevel = inCamera ? 'cam' : inRF ? 'rf' : 'radar';
-    t.sensorLabel = inCamera ? 'EO/IR' : inRF ? 'RADAR + RF' : 'RADAR';
-    if (t.identity && t.identity !== identity) {
-      if (identity === 'confirmed') log('i', `📷 Camera EO/IR nhận dạng chính xác mục tiêu: ${t.name} (${t.id})`);
-      else if (identity === 'probable' && t.identity === 'unknown') log('i', `📶 Trạm RF phát hiện tín hiệu: PROBABLE ${t.name} (${t.id})`);
+    // Displayed name follows sensor coverage: radar only → UNKNOWN, + RF → PROBABLE [name], camera → [name]
+    let dispName, sensorLevel, sensorLabel;
+    if (inCamera) {
+      dispName = t.name;
+      sensorLevel = 'cam';
+      sensorLabel = 'EO/IR';
+    } else if (inRF) {
+      dispName = 'PROBABLE ' + t.name;
+      sensorLevel = 'rf';
+      sensorLabel = 'RADAR + RF';
+    } else {
+      dispName = 'UNKNOWN';
+      sensorLevel = 'radar';
+      sensorLabel = 'RADAR';
     }
-    t.identity = identity;
+    t.dispName = dispName;
+    t.sensorLevel = sensorLevel;
+    t.sensorLabel = sensorLabel;
 
-    const vx = t.s * Math.sin(t.h * D), vy = t.s * Math.cos(t.h * D);
-    const inP = pointInPolygon(t.x, t.y, PP), inR = pointInPolygon(t.x, t.y, PR);
-    const eP = rayEta(t.x, t.y, vx, vy, PP), eR = rayEta(t.x, t.y, vx, vy, PR);
-    const st = classify({ inP, inR, etaP: eP, etaR: eR }, WARN_T);
+    if (t.prevSensorLevel !== undefined && t.prevSensorLevel !== sensorLevel) {
+      if (sensorLevel === 'cam') {
+        log('i', `📷 Camera EO/IR nhận dạng chính xác mục tiêu: ${t.name} (${t.id})`);
+      } else if (sensorLevel === 'rf' && t.prevSensorLevel === 'radar') {
+        log('i', `📶 Trạm RF phát hiện tín hiệu: PROBABLE ${t.name} (${t.id})`);
+      }
+    }
+    t.prevSensorLevel = sensorLevel;
+
+    const eP = eta(ZP, t), eR = eta(ZR, t), dP = dz(ZP, t.x, t.y), dR = dz(ZR, t.x, t.y);
+    const m = Math.min(eP ?? 1e9, eR ?? 1e9);
+
+    // Check if heading towards restricted zone and distance <= 3000m
+    const approachingRestricted = eR !== null && dR > 0 && dR <= 3000;
+
+    // For parallel flying target in safe phase, enforce st = 0
+    let st;
+    if (t.isParallel && t.scenario && t.scenario.phase === 'parallel') {
+      st = 0;
+    } else {
+      st = dP == 0 ? 3 : dR == 0 ? 2 : (m <= WARN_T || approachingRestricted) ? 1 : 0;
+    }
+
+    const inP = dP == 0;
     if (inP && t.inPAt == null) t.inPAt = simT;
     if (!inP) t.inPAt = null;
 
     const dv = {
       distanceArp: Math.hypot(t.x, t.y),
       bearingArp: bearing(t.x, t.y),
-      distToProhibited: distToPolygon(t.x, t.y, PP),
-      distToRestricted: distToPolygon(t.x, t.y, PR),
-      etaProhibited: eP == null ? null : Math.round(eP),
-      etaRestricted: eR == null ? null : Math.round(eR),
+      distToProhibited: dP,
+      distToRestricted: dR,
+      etaProhibited: eP,
+      etaRestricted: eR,
       inProhibitedFor: inP ? simT - t.inPAt : 0,
       inP,
-      inR,
+      inR: dR == 0,
       status: st,
       alt: t.alt,
       speed: t.s,
@@ -357,19 +400,28 @@ export function initEngine() {
     t.dv = dv;
 
     if (st != t.st) {
-      if (st == 3) log('d', `⚠ ${t.name} (${t.id}) ĐÃ XÂM NHẬP VÙNG CẤM BAY – cao ${t.alt} m, ${t.s} m/s`);
-      else if (st == 2) log('w', `${t.name} (${t.id}) vào vùng hạn chế bay`);
+      if (st == 3) log('d', `⚠ ${t.dispName} (${t.id}) ĐÃ XÂM NHẬP VÙNG CẤM BAY – cao ${t.alt} m, ${t.s} m/s`);
+      else if (st == 2) log('w', `${t.dispName} (${t.id}) vào vùng hạn chế bay`);
       else if (st == 1) {
-        const m = Math.min(dv.etaProhibited ?? 1e9, dv.etaRestricted ?? 1e9);
-        log('w', `${t.name} (${t.id}) có nguy cơ xâm nhập – dự báo ${fmtClock(m)} nữa vào ${dv.etaRestricted === m ? 'vùng hạn chế' : 'vùng cấm'}`);
+        if (approachingRestricted) {
+          log('w', `${t.dispName} (${t.id}) tiến gần vùng hạn chế (cách ${fmtDist(dR)}) – nguy cơ xâm nhập`);
+        } else {
+          log('w', `${t.dispName} (${t.id}) có nguy cơ xâm nhập – dự báo ${m}s`);
+        }
       }
-      else if (t.st >= 0) log('i', `${t.name} (${t.id}) trở lại trạng thái an toàn`);
+      else if (t.st >= 0) log('i', `${t.dispName} (${t.id}) trở lại trạng thái an toàn`);
       t.st = st;
     }
 
+    if (approachingRestricted && !t.wR) {
+      t.wR = true;
+      if (st == 1) log('w', `${t.dispName} (${t.id}) đang tiến sát vùng hạn chế (cách ${fmtDist(dR)})`);
+    }
+    if (!approachingRestricted) t.wR = false;
+
     if (eP && eP <= 60 && !t.w) {
       t.w = true;
-      log('d', `${t.name} (${t.id}) ở hướng ${Math.round(dv.bearingArp)}°, cách vùng cấm ${fmtDist(dv.distToProhibited)}, cao ${t.alt} m, ${t.s} m/s, khoảng ${dv.etaProhibited}s nữa xâm nhập`);
+      log('d', `${t.dispName} (${t.id}) ở hướng ${Math.round(dv.bearingArp)}°, cách vùng cấm ${fmtDist(dP)}, cao ${t.alt} m, ${t.s} m/s, khoảng ${eP}s nữa xâm nhập`);
     }
     if (eP === null || eP > 90) t.w = false;
   }
@@ -414,7 +466,13 @@ export function initEngine() {
     $('#cDanger').textContent = i;
     $('#ztDangerBadge').classList.toggle('active', i > 0);
 
+    // While the pointer is over the list keep the previous order so cards do not move under it
     const visible = shown().sort(threat);
+    if (listHover) {
+      const rank = id => { const k = listOrder.indexOf(id); return k < 0 ? Infinity : k; };
+      visible.sort((a, b) => (rank(a.id) - rank(b.id)) || 0);
+    }
+    listOrder = visible.map(t => t.id);
     $('#hT').textContent = 'Danh sách mục tiêu (' + (visible.length === all.length ? visible.length : visible.length + '/' + all.length) + ')';
 
     const listHtml = visible.map(t => {
@@ -424,7 +482,7 @@ export function initEngine() {
       const sym = `<span class="sym sym-${cat(a.status)}" aria-hidden="true"></span>`;
       const row = `<div class="cr" data-sel="${t.id}" role="button" tabindex="0" aria-expanded="${open}" title="${open ? 'Thu gọn' : 'Xem chi tiết & điều chỉnh'}">
           ${sym}
-          <b class="cn">${t.name}</b>
+          <b class="cn">${t.dispName}</b>
           <span class="chip c${a.status}">${SN[a.status]}</span>
           <span class="cv">${fmtDist(a.distanceArp)}</span>
           <span class="cv">${a.alt} m</span>
@@ -468,9 +526,9 @@ export function initEngine() {
         ${row}
         <div class="cd">
           <div class="target-subhead">
-            <span class="idn">${t.identity !== 'confirmed' ? IDN[t.identity] : 'đã nhận dạng'} · ${t.id}</span>
+            <span class="idn">${t.id}</span>
             <span class="chip sens-${t.sensorLevel}">${t.sensorLabel}</span>
-            <button class="icon-btn" data-del="${t.id}" title="Xoá mục tiêu" aria-label="Xoá ${t.name}"><svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M3 6h18M8 6V4h8v2m-9 0 1 14h8l1-14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+            <button class="icon-btn" data-del="${t.id}" title="Xoá mục tiêu" aria-label="Xoá ${t.dispName}"><svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M3 6h18M8 6V4h8v2m-9 0 1 14h8l1-14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
           </div>
           <div class="gr">
             <span>CÁCH ARP<b>${fmtDist(a.distanceArp)}</b></span>
@@ -598,10 +656,10 @@ export function initEngine() {
   function labelLines(t, full) {
     const a = t.dv;
     const dist = fmtDist(a.distanceArp).replace(' ', '');
-    if (!full) return [t.name.replace(/^UAV-/, ''), `${a.alt}m · ${a.speed} · ${dist}`];
+    if (!full) return [t.dispName.replace(/UAV-/, ''), `${a.alt}m · ${a.speed} · ${dist}`];
     const e = etaText(a);
     return [
-      fullName(t),
+      t.dispName,
       `${SN[a.status]} · HDG ${pad3(a.heading)}°`,
       `${a.alt} m · ${a.speed} m/s`,
       `ARP ${fmtDist(a.distanceArp)} · BRG ${pad3(a.bearingArp)}°`,
@@ -914,7 +972,7 @@ export function initEngine() {
               if (Math.abs(newSpeed - t.s) > 0.05) t.s = Math.round(newSpeed * 10) / 10;
               if (t.s >= t.maxSpeed && !sc.maxSpeedLogged) {
                 sc.maxSpeedLogged = true;
-                log('w', `⚡ [Kịch bản] ${t.name} (${t.id}) tăng tốc đạt giới hạn vận tốc: ${t.s} m/s`);
+                log('w', `⚡ [Kịch bản] ${t.dispName} (${t.id}) tăng tốc đạt giới hạn vận tốc: ${t.s} m/s`);
               }
             }
           }
@@ -944,7 +1002,7 @@ export function initEngine() {
     // Nếu mục tiêu ra khỏi tầm phủ Radar thì biến mất
     T = T.filter(t => {
       if (!inRadarCover(t.x, t.y)) {
-        log('i', `📡 ${t.name} (${t.id}) ra khỏi tầm phủ Radar – mục tiêu biến mất`);
+        log('i', `📡 ${t.dispName} (${t.id}) ra khỏi tầm phủ Radar – mục tiêu biến mất`);
         if (selId === t.id) selId = null;
         return false;
       }
@@ -1043,7 +1101,7 @@ export function initEngine() {
     const h = hit(p.mx, p.my);
     if (h) {
       const t = h.t, a = t.dv;
-      $('#hud').textContent = `Đã chọn ${t.name} (${t.id}) · Hướng: ${pad3(a.heading)}° · Cao: ${a.alt} m · V: ${a.speed} m/s – dùng nút ± trong thẻ để chỉnh`;
+      $('#hud').textContent = `Đã chọn ${t.dispName} (${t.id}) · Hướng: ${pad3(a.heading)}° · Cao: ${a.alt} m · V: ${a.speed} m/s – dùng nút ± trong thẻ để chỉnh`;
       select(t.id, true);
       return;
     }
@@ -1144,10 +1202,14 @@ export function initEngine() {
   if (tw) tw.textContent = WARN_T;
 
   const listEl = $('#list');
-  listEl.onpointerdown = e => { if (e.target.closest('button')) listHold = true; };
+  // Freeze the list while a card row or button is pressed, otherwise a 250 ms re-render between
+  // pointerdown and pointerup replaces the element and the click never fires
+  listEl.onpointerdown = e => { if (e.target.closest('button, [data-sel]')) listHold = true; };
   const release = () => { if (listHold) { listHold = false; dirty = true; } };
   window.addEventListener('pointerup', () => setTimeout(release, 0), { signal });
   window.addEventListener('pointercancel', release, { signal });
+  listEl.onpointerenter = () => { listHover = true; };
+  listEl.onpointerleave = () => { listHover = false; dirty = true; };
   listEl.onkeydown = e => {
     const row = e.target.closest('[data-sel]');
     if (row && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); select(row.dataset.sel, false); }
@@ -1188,7 +1250,7 @@ export function initEngine() {
       if (t) {
         const oldAlt = t.alt;
         t.alt = Math.max(10, Math.min(4000, Math.round(t.alt + (+adjAlt))));
-        log('i', `Điều chỉnh độ cao ${t.name} (${t.id}): ${oldAlt} m → ${t.alt} m (${+adjAlt > 0 ? '+' : ''}${adjAlt} m)`);
+        log('i', `Điều chỉnh độ cao ${t.dispName} (${t.id}): ${oldAlt} m → ${t.alt} m (${+adjAlt > 0 ? '+' : ''}${adjAlt} m)`);
         tick();
       }
       return;
@@ -1202,10 +1264,10 @@ export function initEngine() {
         const maxAllowed = t.maxSpeed || 80;
         const newSpd = Math.max(2, Math.min(maxAllowed, Math.round((t.s + (+adjSpd)) * 10) / 10));
         if (newSpd === t.s && +adjSpd > 0) {
-          log('w', `Mục tiêu ${t.name} (${t.id}) đã ở vận tốc tối đa (${t.s} m/s)`);
+          log('w', `Mục tiêu ${t.dispName} (${t.id}) đã ở vận tốc tối đa (${t.s} m/s)`);
         } else {
           t.s = newSpd;
-          log('i', `Điều chỉnh vận tốc ${t.name} (${t.id}): ${oldSpd} m/s → ${t.s} m/s`);
+          log('i', `Điều chỉnh vận tốc ${t.dispName} (${t.id}): ${oldSpd} m/s → ${t.s} m/s`);
           tick();
         }
       }

@@ -213,7 +213,7 @@ export default function App() {
                 <tbody>
                   <tr><th><i className="zdot zd-p"></i>Vùng cấm UAV</th><td>32,8 × 10,4 km (dọc trục đường băng 069°)</td></tr>
                   <tr><th><i className="zdot zd-r"></i>Vùng hạn chế / cảnh báo</th><td>46,8 × 19,4 km (mở rộng quanh vùng cấm)</td></tr>
-                  <tr><th>Dự báo xâm nhập</th><td>Cảnh báo sớm khi ETA ≤ <span id="tWarn">300</span> s</td></tr>
+                  <tr><th>Dự báo xâm nhập</th><td>Cảnh báo sớm khi ETA ≤ <span id="tWarn">180</span> s</td></tr>
                 </tbody>
               </table>
             </section>
@@ -231,8 +231,8 @@ export default function App() {
               <h3><ScanEye className="ic" aria-hidden="true" />Cấp độ nhận dạng mục tiêu</h3>
               <table className="kv">
                 <tbody>
-                  <tr><th>Chỉ phủ Radar</th><td>Hiển thị: <code>[Tên] · chưa nhận dạng</code></td></tr>
-                  <tr><th>Phủ Radar + RF</th><td>Hiển thị: <code>[Tên] · dự đoán</code></td></tr>
+                  <tr><th>Chỉ phủ Radar</th><td>Hiển thị: <code>UNKNOWN</code></td></tr>
+                  <tr><th>Phủ Radar + RF</th><td>Hiển thị: <code>PROBABLE [Tên dự đoán]</code></td></tr>
                   <tr><th>Phủ Camera EO/IR/PTZ</th><td>Nhận dạng chính xác: <code>[Tên mục tiêu cụ thể]</code></td></tr>
                 </tbody>
               </table>
