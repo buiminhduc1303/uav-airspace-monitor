@@ -8,8 +8,3 @@ export const bearing = (dx, dy) => (Math.atan2(dx, dy) / D + 360) % 360;
 
 export const fmtDist = m => m == null || !isFinite(m) ? '—' : m >= 1000 ? (m / 1000).toFixed(2) + ' km' : Math.round(m) + ' m';
 
-export function fmtClock(sec) {
-  const s = Math.max(0, Math.round(sec));
-  const h = Math.floor(s / 3600), mm = String(Math.floor(s / 60) % 60).padStart(2, '0'), ss = String(s % 60).padStart(2, '0');
-  return h ? `${h}:${mm}:${ss}` : `${mm}:${ss}`;
-}

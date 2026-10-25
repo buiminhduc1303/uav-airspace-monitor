@@ -1,4 +1,4 @@
-import { bearing, fmtDist, fmtClock } from './geometry.js';
+import { bearing, fmtDist } from './geometry.js';
 
 // Early-warning horizon: a track that reaches a zone within WARN_T seconds is "warning"
 export const WARN_T = 180;
@@ -109,7 +109,7 @@ export function initEngine() {
   const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
 
   let listHold = false, listHover = false, listOrder = [], T = [], seq = 0, run = true, mult = 20, range = 40, snd = true, logs = [], last = performance.now(), sw = 0, dirty = true, ac, acc = 0, simT = 0;
-  let selId = null, flashAt = 0, hoverId = null, showLabels = true, drag = null, dragMoved = false;
+  let selId = null, flashAt = 0, hoverId = null, mouse = null, showLabels = true, drag = null, dragMoved = false;
   let frames = 0, fpsAcc = 0;
   const filt = { s: true, w: true, d: true };
   const lblOff = {}; // label offsets dragged by the user, keyed by target id
@@ -426,10 +426,12 @@ export function initEngine() {
     if (eP === null || eP > 90) t.w = false;
   }
 
+  const sec = v => Math.round(v) + ' s';
+
   function etaText(dv) {
-    if (dv.inP) return { txt: 'Đã vào · ' + fmtClock(dv.inProhibitedFor), tip: 'Thời gian mục tiêu đã ở trong vùng cấm' };
+    if (dv.inP) return { txt: 'Đã vào · ' + sec(dv.inProhibitedFor), tip: 'Thời gian mục tiêu đã ở trong vùng cấm (giây)' };
     if (dv.etaProhibited == null) return { txt: '—', tip: 'Không hướng vào vùng' };
-    return { txt: fmtClock(dv.etaProhibited), tip: 'Thời gian dự kiến tới vùng cấm (mm:ss)' };
+    return { txt: sec(dv.etaProhibited), tip: 'Thời gian dự kiến tới vùng cấm (giây)' };
   }
 
   const threat = (a, b) => {
@@ -486,7 +488,7 @@ export function initEngine() {
           <span class="chip c${a.status}">${SN[a.status]}</span>
           <span class="cv">${fmtDist(a.distanceArp)}</span>
           <span class="cv">${a.alt} m</span>
-          <span class="cv eta${a.inP ? ' in' : ''}" title="${e.tip}">${a.inP ? e.txt : 'ETA ' + e.txt}</span>
+          <span class="cv eta${a.inP ? ' in' : ''}" title="${e.tip}">${e.txt}</span>
           <svg class="chev" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="m6 9 6 6 6-6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
         </div>`;
       if (!open) return `<article class="card s${a.status}" data-card-id="${t.id}">${row}</article>`;
@@ -538,7 +540,7 @@ export function initEngine() {
             <span>HƯỚNG BAY<b>${pad3(a.heading)}°</b></span>
             <span class="m-p">ĐẾN VÙNG CẤM<b>${fmtDist(a.distToProhibited)}</b></span>
             <span class="m-r">ĐẾN VÙNG HẠN CHẾ<b>${fmtDist(a.distToRestricted)}</b></span>
-            <span class="span-2 m-eta" title="${e.tip}">ETA VÙNG CẤM<b>${e.txt}</b></span>
+            <span class="span-2 m-eta" title="${e.tip}">THỜI GIAN ĐẾN VÙNG CẤM<b>${e.txt}</b></span>
           </div>
           ${scHtml}
           <div class="c-adj">
@@ -656,14 +658,14 @@ export function initEngine() {
   function labelLines(t, full) {
     const a = t.dv;
     const dist = fmtDist(a.distanceArp).replace(' ', '');
-    if (!full) return [t.dispName.replace(/UAV-/, ''), `${a.alt}m · ${a.speed} · ${dist}`];
     const e = etaText(a);
+    if (!full) return [t.dispName, `${a.alt}m · ${a.speed} · ${dist} · ${a.inP ? 'Đã vào ' + sec(a.inProhibitedFor) : e.txt}`];
     return [
       t.dispName,
       `${SN[a.status]} · HDG ${pad3(a.heading)}°`,
       `${a.alt} m · ${a.speed} m/s`,
       `ARP ${fmtDist(a.distanceArp)} · BRG ${pad3(a.bearingArp)}°`,
-      a.inP ? `Vùng cấm: ${e.txt}` : `Vùng cấm ${fmtDist(a.distToProhibited)} · ETA ${e.txt}`
+      a.inP ? `Vùng cấm: ${e.txt}` : `Vùng cấm ${fmtDist(a.distToProhibited)} · ${e.txt}`
     ];
   }
 
@@ -859,7 +861,10 @@ export function initEngine() {
       let w = g.measureText(lines[0]).width;
       g.font = FONT;
       for (let k = 1; k < lines.length; k++) w = Math.max(w, g.measureText(lines[k]).width);
-      w = Math.ceil(w) + PADX * 2;
+      // Width only grows (in 8px steps) so changing digits never resize or re-place the box
+      const mode = full ? 'f' : 'c';
+      t._lw = t._lw || {};
+      w = t._lw[mode] = Math.max(t._lw[mode] || 0, Math.ceil((w + PADX * 2) / 8) * 8);
       const h = lines.length * LH + PADY * 2;
       const others = placed.concat(obs);
 
@@ -869,7 +874,10 @@ export function initEngine() {
         box = { x: x + off.dx, y: y + off.dy, w, h };
       } else {
         const prev = t._lp && t._lp.full === full ? boxAt(x, y, w, h, t._lp.di, t._lp.r) : null;
-        if (prev && cost(prev, others) === 0) {
+        const prevC = prev ? cost(prev, others) : Infinity;
+        // Keep the current slot while it is free, and re-evaluate a blocked slot at most every 600 ms,
+        // moving only for a clearly better one – otherwise crowded labels jump every frame
+        if (prev && (prevC === 0 || now - (t._ls || 0) < 600)) {
           box = prev;
         } else {
           let best = null, bestC = Infinity, bestP = null;
@@ -882,8 +890,13 @@ export function initEngine() {
               if (c === 0) break search;
             }
           }
-          box = best;
-          t._lp = { ...bestP, full };
+          t._ls = now;
+          if (prev && bestC > prevC * .6) {
+            box = prev;
+          } else {
+            box = best;
+            t._lp = { ...bestP, full };
+          }
         }
       }
       placed.push(box);
@@ -1011,6 +1024,7 @@ export function initEngine() {
 
     acc += dt;
     if (acc >= TICK || dirty || nl != T.length) { acc = 0; dirty = false; tick(); }
+    updateHover();
     draw(n);
     window.__rafId = requestAnimationFrame(loop);
   }
@@ -1054,6 +1068,21 @@ export function initEngine() {
     return { mx, my, x, y, b: bearing(x, y), d: Math.hypot(x, y) };
   }
 
+  // Full label on hover is driven by the symbol only (not the label, which grows and moves),
+  // with a larger exit radius so a moving target under a still cursor does not toggle on/off
+  function updateHover() {
+    if (!mouse || drag) return;
+    const vis = shown();
+    const cur = hoverId && vis.find(t => t.id === hoverId);
+    if (cur && Math.hypot(sx(cur.x) - mouse.x, sy(cur.y) - mouse.y) <= 24) return;
+    let best = null, bd = 14;
+    vis.forEach(t => {
+      const d = Math.hypot(sx(t.x) - mouse.x, sy(t.y) - mouse.y);
+      if (d <= bd) { bd = d; best = t; }
+    });
+    hoverId = best ? best.id : null;
+  }
+
   function hit(mx, my) {
     const vis = shown();
     for (let k = vis.length - 1; k >= 0; k--) {
@@ -1084,12 +1113,13 @@ export function initEngine() {
       cv.style.cursor = 'grabbing';
       return;
     }
+    mouse = { x: p.mx, y: p.my };
+    updateHover();
     const h = hit(p.mx, p.my);
-    hoverId = h ? h.t.id : null;
     cv.style.cursor = h ? (h.label ? 'grab' : 'pointer') : 'crosshair';
     $('#hud').textContent = `${(ARP.la + p.y / KY).toFixed(5)}°N  ${(ARP.lo + p.x / KX).toFixed(5)}°E · BRG ${p.b.toFixed(0)}° · ${(p.d / 1000).toFixed(1)} km`;
   };
-  cv.onmouseleave = () => { hoverId = null; };
+  cv.onmouseleave = () => { hoverId = null; mouse = null; };
   window.addEventListener('mouseup', () => { drag = null; }, { signal });
   cv.ondblclick = e => {
     const p = pos(e), h = hit(p.mx, p.my);

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { bearing, fmtDist, fmtClock, D } from './geometry.js';
+import { bearing, fmtDist, D } from './geometry.js';
 
 const near = (a, b, eps = 1e-6) => assert.ok(Math.abs(a - b) < eps, `${a} ≉ ${b}`);
 
@@ -19,6 +19,4 @@ test('bearing of seeded UAV-X1 (265°, 30 km) is ~265°', () => {
 test('formatters', () => {
   assert.equal(fmtDist(7224), '7.22 km');
   assert.equal(fmtDist(183.4), '183 m');
-  assert.equal(fmtClock(135), '02:15');
-  assert.equal(fmtClock(3725), '1:02:05');
 });
